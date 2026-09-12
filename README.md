@@ -14,7 +14,7 @@ Featuring automatic platform link detection, high-bitrate video/audio extraction
 
 ## ✨ Features
 
-- **🐴 Sleek Horse Head Bar Widget**: Sits cleanly on the top-right status bar with perfect optical alignment and theme integration. Smoothly transitions into an animated spinner (`󰑋`) with active colors and progress tooltips during live downloads.
+- **🐴 Sleek Horse Head Bar Widget**: Sits cleanly on the top-right status bar with perfect optical alignment and theme integration. Smoothly transitions into an animated spinner with active colors and progress tooltips during live downloads.
 - **⚡ Superkey Instant Link Capture**: Highlight or copy any video/audio URL anywhere on your screen and hit `SUPER + ALT + V` to grab and enqueue the download instantly in the background with desktop notifications.
 - **🎙️ 100% Offline Whisper AI Transcription**:
   - Local speech-to-text running directly on your hardware via `whisper.cpp` (`whisper-cli`).
@@ -22,13 +22,13 @@ Featuring automatic platform link detection, high-bitrate video/audio extraction
   - Generates synchronized SubRip (`.srt`) and WebVTT (`.vtt`) subtitles (automatically recognized by MPV, VLC, and other players) along with full plaintext transcripts (`.txt`).
   - Model selection: `tiny` (fastest), `base` (recommended default), and `small`.
 - **🎯 Multi-Platform Auto-Detection**: Real-time link inspection with platform-colored badges and icons:
-  - **YouTube** (`󰗃 YouTube` — Red accent)
-  - **X / Twitter** (`󰕄 X / Twitter` — Blue accent)
-  - **Instagram** (`󰋙 Instagram` — Magenta accent)
-  - **Facebook** (`󰈦 Facebook` — Blue accent)
-  - **TikTok** (`󰎁 TikTok` — Cyan accent)
-  - **Reddit** (`󰑍 Reddit` — Orange accent)
-  - **Web Video** (`󰈫 Generic Stream` — Theme accent)
+  - **YouTube** (`YouTube` — Red accent)
+  - **X / Twitter** (`X / Twitter` — Blue accent)
+  - **Instagram** (`Instagram` — Magenta accent)
+  - **Facebook** (`Facebook` — Blue accent)
+  - **TikTok** (`TikTok` — Cyan accent)
+  - **Reddit** (`Reddit` — Orange accent)
+  - **Web Video** (`Generic Stream` — Theme accent)
 - **🎵 Video & Audio Extraction Modes**:
   - **Video (MP4)**: Merges the highest quality video and audio streams seamlessly via `yt-dlp` and `ffmpeg`.
   - **Audio Only (MP3)**: Extracts clean, high-fidelity 320kbps MP3 audio.
@@ -36,7 +36,7 @@ Featuring automatic platform link detection, high-bitrate video/audio extraction
   - One-click clipboard link insertion.
   - Live progress bar, download speed, and ETA tracking.
   - Active downloads list with cancel controls.
-  - History list with one-click media play (`󰐊`) and show-in-folder (`󰉋`) actions.
+  - History list with one-click media play and show-in-folder actions.
 - **💻 CLI & Shell IPC**: Complete terminal and script control via `omapony` CLI and `omarchy-shell omapony <action>`.
 
 Powered by your favorite Discord troll Tonythepony ⚡️⚡️ ft. 🍻 Beers Superpowers 💨🔥
