@@ -6,6 +6,10 @@ A sleek, lightweight, and modern status bar widget and background download daemo
 
 Featuring automatic platform link detection, high-bitrate video/audio extraction, synchronized subtitle generation, and 100% offline speech recognition powered by local Whisper AI.
 
+<p align="center">
+  <img src="assets/screenshot.png" alt="OmaPony Interface Preview" width="680" />
+</p>
+
 ---
 
 ## ✨ Features
