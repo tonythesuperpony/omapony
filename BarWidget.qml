@@ -1,0 +1,820 @@
+import QtQuick
+import QtQuick.Controls
+import QtQuick.Layouts
+import Quickshell
+import Quickshell.Io
+import Quickshell.Wayland
+import qs.Commons
+import qs.Ui
+
+Panel {
+  id: root
+  moduleName: "omapony"
+  ipcTarget: "omapony"
+  manageIpc: true
+
+  implicitWidth: button.implicitWidth
+  implicitHeight: button.implicitHeight
+
+  // State
+  readonly property string statePath: Quickshell.env("HOME") + "/.local/share/omarchy/omapony/state.json"
+  property var stateData: ({ "active": [], "history": [], "whisper_available": false, "whisper_engine": "none" })
+  readonly property var activeJobs: stateData && stateData.active ? stateData.active : []
+  readonly property var historyJobs: stateData && stateData.history ? stateData.history : []
+  readonly property int activeDownloadsCount: activeJobs.length
+  readonly property bool hasActiveDownloads: activeDownloadsCount > 0
+  readonly property bool whisperAvailable: stateData && stateData.whisper_available === true
+  readonly property string whisperEngine: stateData && stateData.whisper_engine ? stateData.whisper_engine : "none"
+
+  // User input & options
+  property string selectedFormat: "video" // "video" or "audio"
+  property bool transcribeEnabled: false
+  property bool subtitlesEnabled: true
+  property string whisperModel: "base" // "tiny", "base", "small"
+  property bool showHelpDrawer: false
+
+  // Live platform detection for typed/pasted URL
+  property var detectedPlatform: detectPlatform(urlInput.text)
+
+  // Rotating animation icon when downloads are active
+  property int spinnerAngle: 0
+  Timer {
+    interval: 100
+    running: root.hasActiveDownloads
+    repeat: true
+    onTriggered: root.spinnerAngle = (root.spinnerAngle + 30) % 360
+  }
+
+  // Periodic poll to refresh state from disk if external processes download
+  Timer {
+    interval: 1000
+    running: root.opened || root.hasActiveDownloads
+    repeat: true
+    onTriggered: stateFile.reload()
+  }
+
+  FileView {
+    id: stateFile
+    path: root.statePath
+    watchChanges: true
+    atomicWrites: true
+    printErrors: false
+    onLoaded: root.loadState(text())
+    onLoadFailed: root.loadState("{}")
+    onFileChanged: reload()
+  }
+
+  function loadState(raw) {
+    try {
+      if (raw && raw.trim() !== "") {
+        root.stateData = JSON.parse(raw)
+      }
+    } catch (e) {
+      console.warn("omapony: failed to parse state JSON", e)
+    }
+  }
+
+  function detectPlatform(url) {
+    if (!url) return null
+    var trimmed = String(url).trim()
+    if (trimmed === "") return null
+    var lower = trimmed.toLowerCase()
+
+    if (lower.indexOf("youtube.com") !== -1 || lower.indexOf("youtu.be") !== -1) {
+      return { id: "youtube", name: "YouTube", icon: "󰗃", color: "#FF0000" }
+    }
+    if (lower.indexOf("x.com") !== -1 || lower.indexOf("twitter.com") !== -1) {
+      return { id: "x", name: "X / Twitter", icon: "󰕄", color: "#1DA1F2" }
+    }
+    if (lower.indexOf("instagram.com") !== -1) {
+      return { id: "instagram", name: "Instagram", icon: "󰋙", color: "#E1306C" }
+    }
+    if (lower.indexOf("facebook.com") !== -1 || lower.indexOf("fb.watch") !== -1) {
+      return { id: "facebook", name: "Facebook", icon: "󰈦", color: "#1877F2" }
+    }
+    if (lower.indexOf("tiktok.com") !== -1) {
+      return { id: "tiktok", name: "TikTok", icon: "󰎁", color: "#00F2FE" }
+    }
+    if (lower.indexOf("reddit.com") !== -1) {
+      return { id: "reddit", name: "Reddit", icon: "󰑍", color: "#FF4500" }
+    }
+    if (lower.indexOf("http://") === 0 || lower.indexOf("https://") === 0) {
+      return { id: "web", name: "Web Video", icon: "󰈫", color: Color.accent }
+    }
+    return null
+  }
+
+  function startDownload() {
+    var url = urlInput.text.trim()
+    if (!url) return
+
+    var cmd = ["omapony", "add", url, "--format", root.selectedFormat]
+    if (root.transcribeEnabled) {
+      cmd.push("--transcribe")
+      if (root.subtitlesEnabled) cmd.push("--subtitles")
+      cmd.push("--model", root.whisperModel)
+    }
+    Quickshell.execDetached(cmd)
+
+    urlInput.text = ""
+    stateFile.reload()
+  }
+
+  function quickGrab() {
+    Quickshell.execDetached(["omapony", "grab"])
+    stateFile.reload()
+  }
+
+  function cancelJob(jobId) {
+    Quickshell.execDetached(["omapony", "cancel", jobId])
+    stateFile.reload()
+  }
+
+  function clearHistory() {
+    Quickshell.execDetached(["omapony", "clear-history"])
+    stateFile.reload()
+  }
+
+  function openFile(path) {
+    if (path) Quickshell.execDetached(["xdg-open", path])
+  }
+
+  function openFolder(path) {
+    Quickshell.execDetached(["omapony", "open-dir", path || ""])
+  }
+
+  // Paste from clipboard helper
+  Process {
+    id: clipPasteProcess
+    command: ["wl-paste", "--no-newline"]
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: function() {
+        var raw = text.trim()
+        if (raw.indexOf("http") !== -1) {
+          var match = raw.match(/https?:\/\/[^\s<>"']+/)
+          if (match) {
+            urlInput.text = match[0]
+          }
+        }
+      }
+    }
+  }
+
+  Component {
+    id: horseHeadIconComponent
+    Text {
+      anchors.centerIn: parent
+      anchors.verticalCenterOffset: root.hasActiveDownloads ? 0 : 3.0
+      text: root.hasActiveDownloads ? "󰑋" : "\uf7ab"
+      font.family: root.hasActiveDownloads ? (root.bar ? root.bar.fontFamily : Style.font.family) : "Font Awesome 7 Free Solid"
+      font.styleName: root.hasActiveDownloads ? "" : "Solid"
+      font.pixelSize: root.hasActiveDownloads ? Style.bar.iconFont : 9.7
+      color: button.active && button.useActiveColor ? button.activeColor : button.foreground
+      renderType: Text.NativeRendering
+      rotation: root.hasActiveDownloads ? root.spinnerAngle : 0
+    }
+  }
+
+  // Bar icon
+  BarIconButton {
+    id: button
+    anchors.fill: parent
+    bar: root.bar
+    iconComponent: horseHeadIconComponent
+    active: root.hasActiveDownloads
+    useActiveColor: true
+    activeColor: Color.accent
+    tooltipText: root.hasActiveDownloads
+      ? ("Downloading " + root.activeDownloadsCount + " item" + (root.activeDownloadsCount > 1 ? "s" : "") + "...")
+      : "OmaPony (Right-click: Grab selection)"
+
+    onPressed: function(btn) {
+      if (btn === Qt.RightButton) {
+        root.quickGrab()
+      } else if (btn === Qt.MiddleButton) {
+        root.openFolder("")
+      } else {
+        root.toggle()
+      }
+    }
+  }
+
+  // Themed Popup Panel
+  KeyboardPanel {
+    id: panel
+    anchorItem: button
+    owner: root
+    bar: root.bar
+    open: root.opened
+    focusTarget: keyCatcher
+    contentWidth: panel.fittedContentWidth(Style.space(420))
+    contentHeight: panel.fittedContentHeight(mainColumn.implicitHeight + Style.space(24), Style.space(640))
+
+    PanelKeyCatcher {
+      id: keyCatcher
+      anchors.fill: parent
+      blocked: urlInput.activeFocus
+      onCloseRequested: root.close()
+
+      Flickable {
+        id: flickable
+        anchors.fill: parent
+        contentWidth: width
+        contentHeight: mainColumn.implicitHeight
+        clip: true
+        boundsBehavior: Flickable.StopAtBounds
+        flickableDirection: Flickable.VerticalFlick
+        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+
+        Column {
+          id: mainColumn
+          width: parent.width
+          spacing: Style.space(12)
+
+          // ------------------------------------------------------------- Header
+          RowLayout {
+            width: parent.width
+            spacing: Style.space(8)
+
+            Rectangle {
+              width: Style.space(32)
+              height: Style.space(32)
+              radius: Style.cornerRadius
+              color: Style.selectedFillFor(Color.foreground, Color.accent)
+
+              Text {
+                anchors.centerIn: parent
+                text: "\uf7ab"
+                font.family: "Font Awesome 7 Free Solid"
+                font.styleName: "Solid"
+                font.pixelSize: Style.font.title
+                color: Color.accent
+                renderType: Text.NativeRendering
+              }
+            }
+
+            ColumnLayout {
+              Layout.fillWidth: true
+              spacing: 0
+
+              Text {
+                text: "OmaPony"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.subtitle
+                font.bold: true
+                color: Color.foreground
+              }
+
+              Text {
+                text: root.hasActiveDownloads
+                  ? ("Downloading " + root.activeDownloadsCount + " item" + (root.activeDownloadsCount > 1 ? "s" : "") + "...")
+                  : "YouTube • X • Instagram • Facebook"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                color: Qt.darker(Color.foreground, 1.4)
+              }
+            }
+
+            // Header Action Buttons
+            Button {
+              iconText: "󰉋"
+              tooltipText: "Open Downloads Folder"
+              onClicked: root.openFolder("")
+            }
+
+            Button {
+              iconText: "󰌌"
+              tooltipText: "Keybinding & AI Info"
+              selected: root.showHelpDrawer
+              onClicked: root.showHelpDrawer = !root.showHelpDrawer
+            }
+
+            Button {
+              iconText: "󰅖"
+              tooltipText: "Close"
+              onClicked: root.close()
+            }
+          }
+
+          // ------------------------------------------------ Keybinding / Info Drawer
+          Rectangle {
+            width: parent.width
+            visible: root.showHelpDrawer
+            implicitHeight: helpCol.implicitHeight + Style.space(16)
+            radius: Style.cornerRadius
+            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08)
+            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.25)
+            border.width: 1
+
+            Column {
+              id: helpCol
+              anchors.fill: parent
+              anchors.margins: Style.space(10)
+              spacing: Style.space(6)
+
+              Text {
+                text: "󰌌 Superkey Fast Download"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+                color: Color.accent
+              }
+
+              Text {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: "Highlight any link on screen and press SUPER+ALT+V to download instantly! Press SUPER+SHIFT+V to toggle this panel."
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                color: Color.foreground
+              }
+
+              Text {
+                text: "󰍬 Offline Whisper Transcription"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+                color: Color.accent
+              }
+
+              Text {
+                width: parent.width
+                wrapMode: Text.Wrap
+                text: root.whisperAvailable
+                  ? ("Engine detected: " + root.whisperEngine + " (100% Offline AI)")
+                  : "Whisper is not installed. Install via: 'omarchy pkg add whisper-cpp' to enable offline speech-to-text and subtitle generation."
+                font.family: Style.font.family
+                font.pixelSize: Style.font.caption
+                color: root.whisperAvailable ? Color.foreground : Color.urgent
+              }
+            }
+          }
+
+          // ------------------------------------------------------------- URL Input & Platform Detection
+          Column {
+            width: parent.width
+            spacing: Style.space(6)
+
+            RowLayout {
+              width: parent.width
+              spacing: Style.space(6)
+
+              TextField {
+                id: urlInput
+                Layout.fillWidth: true
+                placeholderText: "Paste YouTube, X, Instagram, Facebook link..."
+                onAccepted: root.startDownload()
+              }
+
+              Button {
+                iconText: "󰅍"
+                tooltipText: "Paste Link from Clipboard"
+                onClicked: clipPasteProcess.running = true
+              }
+
+              Button {
+                iconText: "󰅖"
+                tooltipText: "Clear"
+                visible: urlInput.text !== ""
+                onClicked: urlInput.text = ""
+              }
+            }
+
+            // Detected Platform Badge
+            Row {
+              spacing: Style.space(8)
+              visible: root.detectedPlatform !== null
+
+              Rectangle {
+                implicitWidth: badgeRow.implicitWidth + Style.space(12)
+                implicitHeight: Style.space(22)
+                radius: Style.cornerRadius
+                color: root.detectedPlatform ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15) : "transparent"
+                border.color: root.detectedPlatform ? root.detectedPlatform.color : "transparent"
+                border.width: 1
+
+                Row {
+                  id: badgeRow
+                  anchors.centerIn: parent
+                  spacing: Style.space(5)
+
+                  Text {
+                    text: root.detectedPlatform ? root.detectedPlatform.icon : ""
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    color: root.detectedPlatform ? root.detectedPlatform.color : Color.foreground
+                  }
+
+                  Text {
+                    text: root.detectedPlatform ? (root.detectedPlatform.name + " Detected") : ""
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    color: Color.foreground
+                  }
+                }
+              }
+            }
+          }
+
+          // ------------------------------------------------------------- Download Format Selector
+          RowLayout {
+            width: parent.width
+            spacing: Style.space(8)
+
+            Button {
+              Layout.fillWidth: true
+              text: "Video (MP4)"
+              iconText: "󰕊"
+              selected: root.selectedFormat === "video"
+              onClicked: root.selectedFormat = "video"
+            }
+
+            Button {
+              Layout.fillWidth: true
+              text: "Audio Only (MP3)"
+              iconText: "󰎆"
+              selected: root.selectedFormat === "audio"
+              onClicked: root.selectedFormat = "audio"
+            }
+          }
+
+          // ------------------------------------------------------------- Offline Whisper AI & Subtitles
+          Rectangle {
+            width: parent.width
+            implicitHeight: whisperCol.implicitHeight + Style.space(16)
+            radius: Style.cornerRadius
+            color: Style.selectedFillFor(Color.foreground, Color.accent)
+            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.2)
+            border.width: 1
+
+            Column {
+              id: whisperCol
+              anchors.fill: parent
+              anchors.margins: Style.space(10)
+              spacing: Style.space(10)
+
+              // Toggle row: Offline Whisper
+              RowLayout {
+                width: parent.width
+
+                ColumnLayout {
+                  Layout.fillWidth: true
+                  spacing: 0
+
+                  Row {
+                    spacing: Style.space(6)
+                    Text {
+                      text: "󰍬"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      color: Color.accent
+                    }
+                    Text {
+                      text: "Offline Whisper Transcription"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                      color: Color.foreground
+                    }
+                  }
+
+                  Text {
+                    text: "100% offline speech-to-text without cloud or internet"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    color: Qt.darker(Color.foreground, 1.4)
+                  }
+                }
+
+                ToggleSwitch {
+                  checked: root.transcribeEnabled
+                  onToggled: root.transcribeEnabled = !root.transcribeEnabled
+                }
+              }
+
+              // Subtitles & Model settings (revealed when transcribe is active)
+              Column {
+                width: parent.width
+                visible: root.transcribeEnabled
+                spacing: Style.space(8)
+
+                RowLayout {
+                  width: parent.width
+
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 0
+
+                    Row {
+                      spacing: Style.space(6)
+                      Text {
+                        text: "󰨖"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        color: Color.accent
+                      }
+                      Text {
+                        text: "Generate Subtitles (.srt & .vtt)"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        color: Color.foreground
+                      }
+                    }
+
+                    Text {
+                      text: "Auto-loaded by media players (MPV, VLC)"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      color: Qt.darker(Color.foreground, 1.4)
+                    }
+                  }
+
+                  ToggleSwitch {
+                    checked: root.subtitlesEnabled
+                    onToggled: root.subtitlesEnabled = !root.subtitlesEnabled
+                  }
+                }
+
+                // Whisper model selector pills
+                RowLayout {
+                  width: parent.width
+                  spacing: Style.space(6)
+
+                  Text {
+                    text: "Model:"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    color: Qt.darker(Color.foreground, 1.3)
+                  }
+
+                  Button {
+                    Layout.fillWidth: true
+                    text: "Tiny"
+                    tooltipText: "Fastest transcription, low resource usage"
+                    selected: root.whisperModel === "tiny"
+                    onClicked: root.whisperModel = "tiny"
+                  }
+
+                  Button {
+                    Layout.fillWidth: true
+                    text: "Base"
+                    tooltipText: "Recommended balance of accuracy and speed"
+                    selected: root.whisperModel === "base"
+                    onClicked: root.whisperModel = "base"
+                  }
+
+                  Button {
+                    Layout.fillWidth: true
+                    text: "Small"
+                    tooltipText: "Higher accuracy for multi-speaker content"
+                    selected: root.whisperModel === "small"
+                    onClicked: root.whisperModel = "small"
+                  }
+                }
+              }
+            }
+          }
+
+          // ------------------------------------------------------------- Download Action Button
+          Button {
+            width: parent.width
+            text: "Start Download"
+            iconText: "󰇚"
+            fontSize: Style.font.subtitle
+            selected: true
+            accent: Color.accent
+            onClicked: root.startDownload()
+          }
+
+          // ------------------------------------------------------------- Active Downloads
+          Column {
+            width: parent.width
+            visible: root.activeJobs.length > 0
+            spacing: Style.space(8)
+
+            Text {
+              text: "Active Downloads (" + root.activeJobs.length + ")"
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+              font.bold: true
+              color: Color.accent
+            }
+
+            Repeater {
+              model: root.activeJobs
+
+              delegate: Rectangle {
+                required property var modelData
+                width: mainColumn.width
+                implicitHeight: activeCol.implicitHeight + Style.space(16)
+                radius: Style.cornerRadius
+                color: Style.selectedFillFor(Color.foreground, Color.accent)
+                border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3)
+                border.width: 1
+
+                Column {
+                  id: activeCol
+                  anchors.fill: parent
+                  anchors.margins: Style.space(10)
+                  spacing: Style.space(6)
+
+                  RowLayout {
+                    width: parent.width
+                    spacing: Style.space(6)
+
+                    Text {
+                      text: modelData.platform_icon || "\uf7ab"
+                      font.family: modelData.platform_icon ? Style.font.family : "Font Awesome 7 Free Solid"
+                      font.styleName: modelData.platform_icon ? "" : "Solid"
+                      font.pixelSize: Style.font.subtitle
+                      color: modelData.platform_color || Color.accent
+                    }
+
+                    Text {
+                      Layout.fillWidth: true
+                      text: modelData.title || modelData.url
+                      elide: Text.ElideRight
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      font.bold: true
+                      color: Color.foreground
+                    }
+
+                    // Format badge
+                    Rectangle {
+                      implicitWidth: fmtTxt.implicitWidth + Style.space(8)
+                      implicitHeight: Style.space(18)
+                      radius: Style.cornerRadius
+                      color: Style.hoverFillFor(Color.foreground, Color.accent)
+                      Text {
+                        id: fmtTxt
+                        anchors.centerIn: parent
+                        text: (modelData.format || "video").toUpperCase()
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        color: Color.foreground
+                      }
+                    }
+
+                    Button {
+                      iconText: "󰅖"
+                      tooltipText: "Cancel Download"
+                      onClicked: root.cancelJob(modelData.id)
+                    }
+                  }
+
+                  // Progress Bar
+                  Rectangle {
+                    width: parent.width
+                    height: Style.space(6)
+                    radius: Style.space(3)
+                    color: Qt.darker(Color.popups.background, 1.2)
+
+                    Rectangle {
+                      height: parent.height
+                      width: Math.max(0, Math.min(parent.width, parent.width * ((modelData.progress || 0) / 100.0)))
+                      radius: Style.space(3)
+                      color: Color.accent
+
+                      Behavior on width {
+                        NumberAnimation { duration: 250; easing.type: Easing.OutQuad }
+                      }
+                    }
+                  }
+
+                  // Status line
+                  RowLayout {
+                    width: parent.width
+
+                    Text {
+                      Layout.fillWidth: true
+                      text: modelData.status === "transcribing"
+                        ? "󰍬 Transcribing offline with Whisper..."
+                        : ((modelData.progress ? (modelData.progress.toFixed(1) + "%") : "0%") +
+                           (modelData.speed && modelData.speed !== "--" ? (" • " + modelData.speed) : "") +
+                           (modelData.eta && modelData.eta !== "--" ? (" • ETA " + modelData.eta) : ""))
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      color: Qt.darker(Color.foreground, 1.3)
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          // ------------------------------------------------------------- Recent Downloads (History)
+          Column {
+            width: parent.width
+            visible: root.historyJobs.length > 0
+            spacing: Style.space(8)
+
+            RowLayout {
+              width: parent.width
+
+              Text {
+                Layout.fillWidth: true
+                text: "Recent Downloads"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.body
+                font.bold: true
+                color: Color.accent
+              }
+
+              Button {
+                iconText: "󰆴"
+                tooltipText: "Clear History"
+                onClicked: root.clearHistory()
+              }
+            }
+
+            Repeater {
+              model: root.historyJobs.slice(0, 6)
+
+              delegate: Rectangle {
+                required property var modelData
+                width: mainColumn.width
+                implicitHeight: historyCol.implicitHeight + Style.space(12)
+                radius: Style.cornerRadius
+                color: Style.selectedFillFor(Color.foreground, Color.accent)
+
+                RowLayout {
+                  id: historyCol
+                  anchors.fill: parent
+                  anchors.margins: Style.space(8)
+                  spacing: Style.space(8)
+
+                  Text {
+                    text: modelData.platform_icon || "\uf7ab"
+                    font.family: modelData.platform_icon ? Style.font.family : "Font Awesome 7 Free Solid"
+                    font.styleName: modelData.platform_icon ? "" : "Solid"
+                    font.pixelSize: Style.font.subtitle
+                    color: modelData.platform_color || Color.accent
+                  }
+
+                  ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 0
+
+                    Text {
+                      Layout.fillWidth: true
+                      text: modelData.title || "Untitled"
+                      elide: Text.ElideRight
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.body
+                      color: Color.foreground
+                    }
+
+                    Row {
+                      spacing: Style.space(6)
+
+                      Text {
+                        text: (modelData.format || "video").toUpperCase() +
+                              (modelData.file_size ? (" • " + modelData.file_size) : "")
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        color: Qt.darker(Color.foreground, 1.4)
+                      }
+
+                      Rectangle {
+                        visible: !!modelData.has_subtitles
+                        implicitWidth: subBadge.implicitWidth + Style.space(6)
+                        implicitHeight: Style.space(16)
+                        radius: Style.cornerRadius
+                        color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.2)
+
+                        Text {
+                          id: subBadge
+                          anchors.centerIn: parent
+                          text: "CC / Subs"
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.caption
+                          color: Color.accent
+                        }
+                      }
+                    }
+                  }
+
+                  Button {
+                    iconText: "󰐊"
+                    tooltipText: "Play / Open"
+                    onClicked: root.openFile(modelData.output_file)
+                  }
+
+                  Button {
+                    iconText: "󰉋"
+                    tooltipText: "Open Folder"
+                    onClicked: root.openFolder(modelData.output_file)
+                  }
+                }
+              }
+            }
+          }
+
+        }
+      }
+    }
+  }
+}

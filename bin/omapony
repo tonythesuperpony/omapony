@@ -1,0 +1,764 @@
+#!/usr/bin/env python3
+"""
+OmaPony - Omarchy Media Downloader & Offline Whisper AI
+Video & Audio Downloader with Offline Whisper Transcription and Subtitle Generation.
+Supports YouTube, X (Twitter), Instagram, Facebook, TikTok, Reddit, and generic web videos.
+"""
+
+import sys
+import os
+import re
+import json
+import time
+import shutil
+import urllib.parse
+import urllib.request
+import subprocess
+import argparse
+from pathlib import Path
+
+# Paths
+HOME = Path.home()
+CONFIG_DIR = HOME / ".config" / "omarchy" / "omapony"
+CONFIG_FILE = CONFIG_DIR / "config.json"
+DATA_DIR = HOME / ".local" / "share" / "omarchy" / "omapony"
+STATE_FILE = DATA_DIR / "state.json"
+MODELS_DIR = DATA_DIR / "models"
+DEFAULT_VIDEO_DIR = HOME / "Videos" / "OmaPony"
+DEFAULT_AUDIO_DIR = HOME / "Music" / "OmaPony"
+
+# Ensure essential directories exist
+CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_config():
+    defaults = {
+        "download_dir": str(DEFAULT_VIDEO_DIR),
+        "audio_dir": str(DEFAULT_AUDIO_DIR),
+        "default_format": "video",  # "video" or "audio"
+        "auto_transcribe": False,
+        "make_subtitles": True,
+        "whisper_model": "base",    # "tiny", "base", "small"
+        "whisper_engine": "auto",   # "auto", "whisper-cpp", "whisper"
+        "notify": True
+    }
+    if not CONFIG_FILE.exists():
+        save_config(defaults)
+        return defaults
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            defaults.update(data)
+            return defaults
+    except Exception:
+        return defaults
+
+
+def save_config(cfg):
+    try:
+        tmp = CONFIG_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+        tmp.replace(CONFIG_FILE)
+    except Exception as e:
+        print(f"Error saving config: {e}", file=sys.stderr)
+
+
+def load_state():
+    engine, available = detect_whisper_engine()
+    empty = {
+        "active": [],
+        "history": [],
+        "whisper_available": available,
+        "whisper_engine": engine
+    }
+    if not STATE_FILE.exists():
+        save_state(empty)
+        return empty
+    try:
+        with open(STATE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+            data["whisper_available"] = available
+            data["whisper_engine"] = engine
+            return data
+    except Exception:
+        return empty
+
+
+def save_state(st):
+    try:
+        tmp = STATE_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(st, f, indent=2)
+        tmp.replace(STATE_FILE)
+    except Exception as e:
+        print(f"Error saving state: {e}", file=sys.stderr)
+
+
+def detect_whisper_engine():
+    # Priority 1: whisper-cli / whisper-cpp (fastest C++ implementation)
+    if shutil.which("whisper-cli"):
+        return "whisper-cli", True
+    if shutil.which("whisper.cpp"):
+        return "whisper.cpp", True
+    # Priority 2: python-openai-whisper CLI
+    if shutil.which("whisper"):
+        return "whisper", True
+    # Priority 3: python module
+    try:
+        import faster_whisper
+        return "faster_whisper", True
+    except ImportError:
+        pass
+    try:
+        import whisper
+        return "whisper-py", True
+    except ImportError:
+        pass
+    return "none", False
+
+
+def notify(title, message, urgency="normal", icon="video-x-generic"):
+    try:
+        subprocess.run(
+            ["notify-send", "-a", "OmaPony", "-u", urgency, "-i", icon, title, message],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+    except Exception:
+        pass
+
+
+def detect_platform(url):
+    """
+    Returns platform metadata dictionary:
+    {
+      'id': 'youtube' | 'x' | 'instagram' | 'facebook' | 'tiktok' | 'reddit' | 'web',
+      'name': 'YouTube' | 'X / Twitter' | ...,
+      'icon': '󰗃' | '󰕄' | ...,
+      'color': '#FF0000' | '#1DA1F2' | ...
+    }
+    """
+    if not url:
+        return {
+            "id": "unknown",
+            "name": "Unknown",
+            "icon": "󰈫",
+            "color": "#888888"
+        }
+
+    url_lower = url.lower()
+
+    # YouTube
+    if re.search(r'(?:youtube\.com|youtu\.be)', url_lower):
+        return {
+            "id": "youtube",
+            "name": "YouTube",
+            "icon": "󰗃",
+            "color": "#FF0000"
+        }
+
+    # X (Twitter)
+    if re.search(r'(?:x\.com|twitter\.com)', url_lower):
+        return {
+            "id": "x",
+            "name": "X / Twitter",
+            "icon": "󰕄",
+            "color": "#1DA1F2"
+        }
+
+    # Instagram
+    if re.search(r'instagram\.com', url_lower):
+        return {
+            "id": "instagram",
+            "name": "Instagram",
+            "icon": "󰋙",
+            "color": "#E1306C"
+        }
+
+    # Facebook
+    if re.search(r'(?:facebook\.com|fb\.watch)', url_lower):
+        return {
+            "id": "facebook",
+            "name": "Facebook",
+            "icon": "󰈦",
+            "color": "#1877F2"
+        }
+
+    # TikTok
+    if re.search(r'tiktok\.com', url_lower):
+        return {
+            "id": "tiktok",
+            "name": "TikTok",
+            "icon": "󰎁",
+            "color": "#00F2FE"
+        }
+
+    # Reddit
+    if re.search(r'reddit\.com', url_lower):
+        return {
+            "id": "reddit",
+            "name": "Reddit",
+            "icon": "󰑍",
+            "color": "#FF4500"
+        }
+
+    # Generic Web Video
+    return {
+        "id": "web",
+        "name": "Web Video",
+        "icon": "󰈫",
+        "color": "#7AA2F7"
+    }
+
+
+def extract_url_from_text(text):
+    if not text:
+        return None
+    # Match standard URLs
+    matches = re.findall(r'https?://[^\s<>"\'`]+', text.strip())
+    if matches:
+        clean = matches[0].rstrip('.,;:!?)>"\'`')
+        return clean
+    return None
+
+
+def get_selection_or_clipboard():
+    # 1. Primary selection in Wayland
+    try:
+        res = subprocess.run(
+            ["wl-paste", "--primary", "--no-newline"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            url = extract_url_from_text(res.stdout)
+            if url:
+                return url, "selection"
+    except Exception:
+        pass
+
+    # 2. Regular clipboard
+    try:
+        res = subprocess.run(
+            ["wl-paste", "--no-newline"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False
+        )
+        if res.returncode == 0 and res.stdout.strip():
+            url = extract_url_from_text(res.stdout)
+            if url:
+                return url, "clipboard"
+    except Exception:
+        pass
+
+    return None, None
+
+
+def cmd_detect(args):
+    """Detect platform for given URL and output JSON"""
+    url = args.url
+    meta = detect_platform(url)
+    print(json.dumps(meta))
+
+
+def cmd_grab(args):
+    """Grab link from selection/clipboard and initiate download"""
+    url, source = get_selection_or_clipboard()
+    if not url:
+        notify("OmaPony", "No media URL found in selection or clipboard.", urgency="low", icon="dialog-warning")
+        sys.exit(1)
+
+    cfg = load_config()
+    meta = detect_platform(url)
+
+    # Format from args or config
+    fmt = args.format or cfg.get("default_format", "video")
+    transcribe = args.transcribe if args.transcribe is not None else cfg.get("auto_transcribe", False)
+    subtitles = args.subtitles if args.subtitles is not None else cfg.get("make_subtitles", True)
+    model = args.model or cfg.get("whisper_model", "base")
+
+    notify(
+        f"OmaPony • {meta['name']}",
+        f"Captured {fmt.upper()} link from {source}.\nStarting download...",
+        icon="video-x-generic"
+    )
+
+    job_id = add_job(url, fmt, transcribe, subtitles, model)
+    spawn_worker(job_id)
+    print(json.dumps({"status": "queued", "job_id": job_id, "url": url, "platform": meta["name"]}))
+
+
+def cmd_add(args):
+    """Add a download job manually"""
+    url = extract_url_from_text(args.url) or args.url
+    if not url.startswith("http"):
+        print(json.dumps({"error": "Invalid URL"}), file=sys.stderr)
+        sys.exit(1)
+
+    cfg = load_config()
+    fmt = args.format or cfg.get("default_format", "video")
+    transcribe = args.transcribe if args.transcribe is not None else cfg.get("auto_transcribe", False)
+    subtitles = args.subtitles if args.subtitles is not None else cfg.get("make_subtitles", True)
+    model = args.model or cfg.get("whisper_model", "base")
+
+    job_id = add_job(url, fmt, transcribe, subtitles, model)
+    spawn_worker(job_id)
+    print(json.dumps({"status": "queued", "job_id": job_id}))
+
+
+def add_job(url, fmt, transcribe, subtitles, model):
+    meta = detect_platform(url)
+    job_id = f"dl_{int(time.time())}_{os.urandom(3).hex()}"
+    job = {
+        "id": job_id,
+        "url": url,
+        "platform": meta["name"],
+        "platform_id": meta["id"],
+        "platform_icon": meta["icon"],
+        "platform_color": meta["color"],
+        "title": f"Fetching metadata ({meta['name']})...",
+        "format": fmt,
+        "transcribe": bool(transcribe),
+        "subtitles": bool(subtitles),
+        "model": model,
+        "status": "queued",
+        "progress": 0.0,
+        "speed": "--",
+        "eta": "--",
+        "downloaded_bytes": 0,
+        "total_bytes": 0,
+        "output_file": "",
+        "subtitles_file": "",
+        "transcript_file": "",
+        "error_message": "",
+        "pid": None,
+        "created_at": int(time.time())
+    }
+
+    state = load_state()
+    state["active"].append(job)
+    save_state(state)
+    return job_id
+
+
+def spawn_worker(job_id):
+    script_path = os.path.abspath(__file__)
+    subprocess.Popen(
+        [sys.executable, script_path, "_worker", job_id],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL
+    )
+
+
+def update_job_state(job_id, updates):
+    state = load_state()
+    updated = False
+    for job in state.get("active", []):
+        if job.get("id") == job_id:
+            job.update(updates)
+            updated = True
+            break
+    if updated:
+        save_state(state)
+
+
+def download_whisper_model(model_name="base"):
+    """
+    Downloads GGML model for whisper-cpp if not already present
+    """
+    model_file = MODELS_DIR / f"ggml-{model_name}.bin"
+    if model_file.exists() and model_file.stat().st_size > 1000000:
+        return str(model_file)
+
+    url = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-{model_name}.bin"
+    notify("Whisper Offline AI", f"Downloading {model_name} model for offline transcription...", icon="network-wireless")
+    try:
+        tmp_file = model_file.with_suffix(".tmp")
+        urllib.request.urlretrieve(url, str(tmp_file))
+        tmp_file.replace(model_file)
+        return str(model_file)
+    except Exception as e:
+        print(f"Error downloading whisper model: {e}", file=sys.stderr)
+        return None
+
+
+def run_offline_whisper(media_file, model_name="base", generate_subtitles=True):
+    """
+    Runs offline whisper transcription on media_file.
+    Generates .srt, .vtt, and .txt files alongside media_file.
+    """
+    media_path = Path(media_file)
+    if not media_path.exists():
+        return None, None
+
+    engine, available = detect_whisper_engine()
+    if not available:
+        notify(
+            "Whisper Offline AI",
+            "Whisper is not installed.\nRun 'omarchy pkg add whisper-cpp' to enable offline transcription.",
+            urgency="normal",
+            icon="dialog-information"
+        )
+        return None, None
+
+    base_output = str(media_path.with_suffix(""))
+    wav_path = Path(f"/tmp/{media_path.stem}_whisper_{os.getpid()}.wav")
+
+    try:
+        # Step 1: Extract 16kHz mono audio (best format for Whisper)
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", str(media_path), "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le", str(wav_path)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True
+        )
+
+        # Step 2: Run Whisper engine
+        if engine in ("whisper-cli", "whisper.cpp"):
+            model_path = download_whisper_model(model_name)
+            if not model_path:
+                return None, None
+
+            cmd = [
+                engine,
+                "-m", model_path,
+                "-f", str(wav_path),
+                "-otxt",
+                "-of", base_output
+            ]
+            if generate_subtitles:
+                cmd.extend(["-osrt", "-ovtt"])
+
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+        elif engine == "whisper":
+            cmd = [
+                "whisper",
+                str(wav_path),
+                "--model", model_name,
+                "--output_format", "all" if generate_subtitles else "txt",
+                "--output_dir", str(media_path.parent)
+            ]
+            subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+        srt_file = f"{base_output}.srt" if generate_subtitles else ""
+        txt_file = f"{base_output}.txt"
+
+        return srt_file if Path(srt_file).exists() else "", txt_file if Path(txt_file).exists() else ""
+
+    except Exception as e:
+        print(f"Whisper transcription failed: {e}", file=sys.stderr)
+        return None, None
+    finally:
+        if wav_path.exists():
+            try:
+                wav_path.unlink()
+            except Exception:
+                pass
+
+
+def cmd_worker(args):
+    """Background worker process executing download and transcription for a job"""
+    job_id = args.job_id
+    state = load_state()
+    job = None
+    for j in state.get("active", []):
+        if j.get("id") == job_id:
+            job = j
+            break
+
+    if not job:
+        print(f"Job {job_id} not found", file=sys.stderr)
+        return
+
+    cfg = load_config()
+    out_dir = Path(cfg.get("audio_dir" if job["format"] == "audio" else "download_dir"))
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    out_template = str(out_dir / "%(title)s [%(id)s].%(ext)s")
+
+    # Construct yt-dlp command
+    cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "--newline",
+        "--progress-template",
+        "download:PROG:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s",
+        "--print", "before_dl:TITLE:%(title)s",
+        "--print", "after_move:FINAL:%(filepath)s",
+        "-o", out_template
+    ]
+
+    if job["format"] == "audio":
+        cmd.extend(["-x", "--audio-format", "mp3", "--audio-quality", "0"])
+    else:
+        cmd.extend(["-f", "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best", "--merge-output-format", "mp4"])
+
+    cmd.append(job["url"])
+
+    update_job_state(job_id, {"status": "downloading", "pid": os.getpid()})
+
+    final_path = ""
+    last_update_time = 0
+    title = job.get("title", "")
+
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
+
+        for raw_line in proc.stdout:
+            line = raw_line.strip()
+            if line.startswith("TITLE:"):
+                title = line[6:].strip()
+                update_job_state(job_id, {"title": title})
+
+            elif line.startswith("FINAL:"):
+                final_path = line[6:].strip()
+                update_job_state(job_id, {"output_file": final_path})
+
+            elif "PROG:" in line:
+                try:
+                    parts = line.split("PROG:")[1].split("|")
+                    pct_str = parts[0].replace("%", "").strip()
+                    pct = float(pct_str) if pct_str else 0.0
+                    spd = parts[1].strip() if len(parts) > 1 else "--"
+                    eta = parts[2].strip() if len(parts) > 2 else "--"
+                    dl_b = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+                    tot_b = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+
+                    now = time.time()
+                    if now - last_update_time >= 0.4 or pct >= 100.0:
+                        last_update_time = now
+                        update_job_state(job_id, {
+                            "progress": pct,
+                            "speed": spd,
+                            "eta": eta,
+                            "downloaded_bytes": dl_b,
+                            "total_bytes": tot_b
+                        })
+                except Exception:
+                    pass
+
+        proc.wait()
+
+        if proc.returncode != 0:
+            err = f"yt-dlp exited with code {proc.returncode}"
+            update_job_state(job_id, {"status": "error", "error_message": err})
+            notify("OmaPony", f"Failed to download {title or job['url']}", urgency="critical", icon="dialog-error")
+            return
+
+        # If final_path was not captured through after_move hook, locate newest matching file
+        if not final_path or not Path(final_path).exists():
+            files = sorted(out_dir.glob("*"), key=lambda f: f.stat().st_mtime, reverse=True)
+            if files:
+                final_path = str(files[0])
+
+        update_job_state(job_id, {"progress": 100.0, "status": "processing", "output_file": final_path})
+
+        subtitles_file = ""
+        transcript_file = ""
+
+        # Step: Offline Whisper Transcription
+        if job.get("transcribe") and final_path:
+            update_job_state(job_id, {"status": "transcribing", "progress": 99.0})
+            notify(
+                "Whisper Offline AI",
+                f"Transcribing '{title}' offline using Whisper {job.get('model', 'base')}...",
+                icon="audio-x-generic"
+            )
+
+            srt_res, txt_res = run_offline_whisper(
+                final_path,
+                model_name=job.get("model", "base"),
+                generate_subtitles=job.get("subtitles", True)
+            )
+            subtitles_file = srt_res or ""
+            transcript_file = txt_res or ""
+
+        # Move to history
+        state = load_state()
+        history_entry = None
+        new_active = []
+        for j in state.get("active", []):
+            if j.get("id") == job_id:
+                history_entry = {
+                    "id": job_id,
+                    "url": j["url"],
+                    "platform": j["platform"],
+                    "platform_id": j.get("platform_id", "web"),
+                    "platform_icon": j["platform_icon"],
+                    "platform_color": j["platform_color"],
+                    "title": title or Path(final_path).name,
+                    "format": j["format"],
+                    "transcribed": bool(job.get("transcribe")),
+                    "has_subtitles": bool(subtitles_file),
+                    "output_file": final_path,
+                    "subtitles_file": subtitles_file,
+                    "transcript_file": transcript_file,
+                    "file_size": f"{Path(final_path).stat().st_size / (1024*1024):.1f} MB" if final_path and Path(final_path).exists() else "",
+                    "completed_at": int(time.time())
+                }
+            else:
+                new_active.append(j)
+
+        state["active"] = new_active
+        if history_entry:
+            state.setdefault("history", []).insert(0, history_entry)
+            state["history"] = state["history"][:40]  # Keep last 40 entries
+        save_state(state)
+
+        # Completion notification
+        sub_info = "\nSubtitles & transcript generated." if subtitles_file else ""
+        notify(
+            f"✓ Download Complete • {job['platform']}",
+            f"{title or Path(final_path).name}\nSaved to {Path(final_path).parent}{sub_info}",
+            icon="video-x-generic"
+        )
+
+    except Exception as e:
+        update_job_state(job_id, {"status": "error", "error_message": str(e)})
+        notify("OmaPony", f"Error: {e}", urgency="critical", icon="dialog-error")
+
+
+def cmd_cancel(args):
+    """Cancel an active download"""
+    job_id = args.job_id
+    state = load_state()
+    target = None
+    for j in state.get("active", []):
+        if j.get("id") == job_id:
+            target = j
+            break
+    if target and target.get("pid"):
+        try:
+            os.kill(target["pid"], 9)
+        except Exception:
+            pass
+    state["active"] = [j for j in state.get("active", []) if j.get("id") != job_id]
+    save_state(state)
+    print(json.dumps({"status": "cancelled", "job_id": job_id}))
+
+
+def cmd_clear_history(args):
+    """Clear completed downloads history"""
+    state = load_state()
+    state["history"] = []
+    save_state(state)
+    print(json.dumps({"status": "cleared"}))
+
+
+def cmd_open(args):
+    """Open downloaded file or directory with default application"""
+    path = args.path
+    if not path or not Path(path).exists():
+        return
+    subprocess.Popen(["xdg-open", path], start_new_session=True)
+
+
+def cmd_open_dir(args):
+    """Open folder in file manager"""
+    path = args.path or str(DEFAULT_VIDEO_DIR)
+    p = Path(path)
+    if p.is_file():
+        p = p.parent
+    p.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen(["xdg-open", str(p)], start_new_session=True)
+
+
+def cmd_toggle(args):
+    """Summon / toggle the Quickshell UI panel via IPC"""
+    subprocess.run(["omarchy-shell", "omapony", "toggle"], check=False)
+
+
+def cmd_status(args):
+    """Output current state in JSON"""
+    st = load_state()
+    print(json.dumps(st, indent=2))
+
+
+def main():
+    parser = argparse.ArgumentParser(description="OmaPony - Omarchy Media Downloader & Offline Whisper AI")
+    subparsers = parser.add_subparsers(dest="command")
+
+    # grab: superkey command
+    p_grab = subparsers.add_parser("grab", help="Grab link from selection/clipboard and download")
+    p_grab.add_argument("--format", choices=["video", "audio"], default=None)
+    p_grab.add_argument("--transcribe", action="store_true", default=None)
+    p_grab.add_argument("--no-transcribe", action="store_false", dest="transcribe")
+    p_grab.add_argument("--subtitles", action="store_true", default=None)
+    p_grab.add_argument("--model", choices=["tiny", "base", "small"], default=None)
+
+    # add: manual URL download
+    p_add = subparsers.add_parser("add", help="Add URL to download queue")
+    p_add.add_argument("url", help="Media URL")
+    p_add.add_argument("--format", choices=["video", "audio"], default="video")
+    p_add.add_argument("--transcribe", action="store_true", default=False)
+    p_add.add_argument("--subtitles", action="store_true", default=True)
+    p_add.add_argument("--model", choices=["tiny", "base", "small"], default="base")
+
+    # detect
+    p_detect = subparsers.add_parser("detect", help="Detect platform for URL")
+    p_detect.add_argument("url", help="URL to inspect")
+
+    # cancel
+    p_cancel = subparsers.add_parser("cancel", help="Cancel active job")
+    p_cancel.add_argument("job_id", help="Job ID to cancel")
+
+    # clear-history
+    subparsers.add_parser("clear-history", help="Clear completed downloads history")
+
+    # open & open-dir
+    p_open = subparsers.add_parser("open", help="Open file")
+    p_open.add_argument("path", help="Path to file")
+
+    p_opendir = subparsers.add_parser("open-dir", help="Open folder")
+    p_opendir.add_argument("path", nargs="?", default="", help="Path to directory")
+
+    # toggle / summon
+    subparsers.add_parser("toggle", help="Toggle downloader UI panel")
+    subparsers.add_parser("summon", help="Summon downloader UI panel")
+
+    # status
+    subparsers.add_parser("status", help="Get JSON status")
+
+    # internal worker
+    p_worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
+    p_worker.add_argument("job_id", help="Job ID")
+
+    args = parser.parse_args()
+
+    if not args.command or args.command in ("summon", "toggle"):
+        cmd_toggle(args)
+    elif args.command == "grab":
+        cmd_grab(args)
+    elif args.command == "add":
+        cmd_add(args)
+    elif args.command == "detect":
+        cmd_detect(args)
+    elif args.command == "cancel":
+        cmd_cancel(args)
+    elif args.command == "clear-history":
+        cmd_clear_history(args)
+    elif args.command == "open":
+        cmd_open(args)
+    elif args.command == "open-dir":
+        cmd_open_dir(args)
+    elif args.command == "status":
+        cmd_status(args)
+    elif args.command == "_worker":
+        cmd_worker(args)
+
+
+if __name__ == "__main__":
+    main()

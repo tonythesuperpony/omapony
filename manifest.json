@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "omapony",
+  "name": "OmaPony",
+  "version": "1.0.0",
+  "author": "tonythesuperpony",
+  "license": "MIT",
+  "description": "Video & audio downloader with offline Whisper AI transcription, automatic subtitles, platform detection, and superkey link grab for Omarchy Linux.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaPony",
+    "description": "Video & audio downloader with offline Whisper AI transcription and subtitle support",
+    "category": "Media",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
