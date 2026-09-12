@@ -82,8 +82,13 @@ def load_state():
     try:
         with open(STATE_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
-            data["whisper_available"] = available
-            data["whisper_engine"] = engine
+            changed = False
+            if data.get("whisper_available") != available or data.get("whisper_engine") != engine:
+                data["whisper_available"] = available
+                data["whisper_engine"] = engine
+                changed = True
+            if changed:
+                save_state(data)
             return data
     except Exception:
         return empty
@@ -687,6 +692,34 @@ def cmd_status(args):
     print(json.dumps(st, indent=2))
 
 
+def cmd_install_whisper(args):
+    """Launch terminal to install whisper-cpp via omarchy pkg add"""
+    script = (
+        "echo -e '\\033[1;36m====================================================\\033[0m'; "
+        "echo -e '\\033[1;36m           OmaPony: Install Whisper AI              \\033[0m'; "
+        "echo -e '\\033[1;36m====================================================\\033[0m\\n'; "
+        "echo 'Installing whisper-cpp for 100% offline transcription...\\n'; "
+        "if omarchy pkg add whisper-cpp; then "
+        "  echo -e '\\n\\033[1;32m[OK] whisper-cpp successfully installed!\\033[0m'; "
+        "  omapony status >/dev/null 2>&1; "
+        "else "
+        "  echo -e '\\n\\033[1;31m[FAILED] Could not install whisper-cpp automatically.\\033[0m'; "
+        "  echo 'Try manually running: sudo pacman -S whisper-cpp'; "
+        "fi; "
+        "echo ''; "
+        "read -n 1 -s -r -p 'Press any key to close this terminal...'"
+    )
+    term_cmd = None
+    for candidate in ["omarchy-launch-terminal", "xdg-terminal-exec", "ghostty", "foot", "kitty"]:
+        if shutil.which(candidate):
+            term_cmd = candidate
+            break
+    if term_cmd:
+        subprocess.Popen([term_cmd, "bash", "-c", script], start_new_session=True)
+    else:
+        notify("OmaPony", "Run in terminal: omarchy pkg add whisper-cpp", urgency="critical")
+
+
 def main():
     parser = argparse.ArgumentParser(description="OmaPony - Omarchy Media Downloader & Offline Whisper AI")
     subparsers = parser.add_subparsers(dest="command")
@@ -732,6 +765,9 @@ def main():
     # status
     subparsers.add_parser("status", help="Get JSON status")
 
+    # install-whisper
+    subparsers.add_parser("install-whisper", help="Install whisper-cpp for offline transcription")
+
     # internal worker
     p_worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     p_worker.add_argument("job_id", help="Job ID")
@@ -756,6 +792,8 @@ def main():
         cmd_open_dir(args)
     elif args.command == "status":
         cmd_status(args)
+    elif args.command == "install-whisper":
+        cmd_install_whisper(args)
     elif args.command == "_worker":
         cmd_worker(args)
 

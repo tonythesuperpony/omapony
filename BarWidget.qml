@@ -53,6 +53,16 @@ Panel {
     onTriggered: stateFile.reload()
   }
 
+  onOpenedChanged: {
+    if (root.opened) {
+      Quickshell.execDetached(["omapony", "status"])
+      stateFile.reload()
+      Qt.callLater(function() {
+        if (root.opened) urlInput.forceActiveFocus()
+      })
+    }
+  }
+
   FileView {
     id: stateFile
     path: root.statePath
@@ -143,6 +153,10 @@ Panel {
     Quickshell.execDetached(["omapony", "open-dir", path || ""])
   }
 
+  function installWhisper() {
+    Quickshell.execDetached(["omapony", "install-whisper"])
+  }
+
   // Paste from clipboard helper
   Process {
     id: clipPasteProcess
@@ -165,6 +179,7 @@ Panel {
     id: horseHeadIconComponent
     Text {
       anchors.centerIn: parent
+      anchors.horizontalCenterOffset: root.hasActiveDownloads ? 0 : 3.17
       anchors.verticalCenterOffset: root.hasActiveDownloads ? 0 : 3.0
       text: root.hasActiveDownloads ? "󰑋" : "\uf7ab"
       font.family: root.hasActiveDownloads ? (root.bar ? root.bar.fontFamily : Style.font.family) : "Font Awesome 7 Free Solid"
@@ -207,9 +222,9 @@ Panel {
     owner: root
     bar: root.bar
     open: root.opened
-    focusTarget: keyCatcher
+    focusTarget: urlInput
     contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(mainColumn.implicitHeight + Style.space(24), Style.space(640))
+    contentHeight: panel.fittedContentHeight(mainColumn.implicitHeight, Style.space(640))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -301,6 +316,7 @@ Panel {
           Rectangle {
             width: parent.width
             visible: root.showHelpDrawer
+            height: visible ? (helpCol.implicitHeight + Style.space(16)) : 0
             implicitHeight: helpCol.implicitHeight + Style.space(16)
             radius: Style.cornerRadius
             color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08)
@@ -343,7 +359,7 @@ Panel {
                 wrapMode: Text.Wrap
                 text: root.whisperAvailable
                   ? ("Engine detected: " + root.whisperEngine + " (100% Offline AI)")
-                  : "Whisper is not installed. Install via: 'omarchy pkg add whisper-cpp' to enable offline speech-to-text and subtitle generation."
+                  : "Whisper is not installed. Click 'Install Whisper' or run 'omarchy pkg add whisper-cpp' to enable offline speech-to-text and subtitle generation."
                 font.family: Style.font.family
                 font.pixelSize: Style.font.caption
                 color: root.whisperAvailable ? Color.foreground : Color.urgent
@@ -442,7 +458,10 @@ Panel {
 
           // ------------------------------------------------------------- Offline Whisper AI & Subtitles
           Rectangle {
+            id: whisperSection
             width: parent.width
+            visible: urlInput.text.trim() !== ""
+            height: visible ? (whisperCol.implicitHeight + Style.space(16)) : 0
             implicitHeight: whisperCol.implicitHeight + Style.space(16)
             radius: Style.cornerRadius
             color: Style.selectedFillFor(Color.foreground, Color.accent)
@@ -455,51 +474,13 @@ Panel {
               anchors.margins: Style.space(10)
               spacing: Style.space(10)
 
-              // Toggle row: Offline Whisper
-              RowLayout {
-                width: parent.width
-
-                ColumnLayout {
-                  Layout.fillWidth: true
-                  spacing: 0
-
-                  Row {
-                    spacing: Style.space(6)
-                    Text {
-                      text: "󰍬"
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.body
-                      color: Color.accent
-                    }
-                    Text {
-                      text: "Offline Whisper Transcription"
-                      font.family: Style.font.family
-                      font.pixelSize: Style.font.body
-                      font.bold: true
-                      color: Color.foreground
-                    }
-                  }
-
-                  Text {
-                    text: "100% offline speech-to-text without cloud or internet"
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    color: Qt.darker(Color.foreground, 1.4)
-                  }
-                }
-
-                ToggleSwitch {
-                  checked: root.transcribeEnabled
-                  onToggled: root.transcribeEnabled = !root.transcribeEnabled
-                }
-              }
-
-              // Subtitles & Model settings (revealed when transcribe is active)
+              // When Whisper IS installed: show transcription toggle & subtitle controls
               Column {
                 width: parent.width
-                visible: root.transcribeEnabled
-                spacing: Style.space(8)
+                visible: root.whisperAvailable
+                spacing: Style.space(10)
 
+                // Toggle row: Offline Whisper
                 RowLayout {
                   width: parent.width
 
@@ -510,21 +491,22 @@ Panel {
                     Row {
                       spacing: Style.space(6)
                       Text {
-                        text: "󰨖"
+                        text: "󰍬"
                         font.family: Style.font.family
                         font.pixelSize: Style.font.body
                         color: Color.accent
                       }
                       Text {
-                        text: "Generate Subtitles (.srt & .vtt)"
+                        text: "Offline Whisper Transcription"
                         font.family: Style.font.family
                         font.pixelSize: Style.font.body
+                        font.bold: true
                         color: Color.foreground
                       }
                     }
 
                     Text {
-                      text: "Auto-loaded by media players (MPV, VLC)"
+                      text: "100% offline speech-to-text without cloud or internet"
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
                       color: Qt.darker(Color.foreground, 1.4)
@@ -532,46 +514,167 @@ Panel {
                   }
 
                   ToggleSwitch {
-                    checked: root.subtitlesEnabled
-                    onToggled: root.subtitlesEnabled = !root.subtitlesEnabled
+                    checked: root.transcribeEnabled
+                    onToggled: root.transcribeEnabled = !root.transcribeEnabled
                   }
                 }
 
-                // Whisper model selector pills
+                // Subtitles & Model settings (revealed when transcribe is active)
+                Column {
+                  width: parent.width
+                  visible: root.transcribeEnabled
+                  spacing: Style.space(8)
+
+                  RowLayout {
+                    width: parent.width
+
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: 0
+
+                      Row {
+                        spacing: Style.space(6)
+                        Text {
+                          text: "󰨖"
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.body
+                          color: Color.accent
+                        }
+                        Text {
+                          text: "Generate Subtitles (.srt & .vtt)"
+                          font.family: Style.font.family
+                          font.pixelSize: Style.font.body
+                          color: Color.foreground
+                        }
+                      }
+
+                      Text {
+                        text: "Auto-loaded by media players (MPV, VLC)"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        color: Qt.darker(Color.foreground, 1.4)
+                      }
+                    }
+
+                    ToggleSwitch {
+                      checked: root.subtitlesEnabled
+                      onToggled: root.subtitlesEnabled = !root.subtitlesEnabled
+                    }
+                  }
+
+                  // Whisper model selector pills
+                  RowLayout {
+                    width: parent.width
+                    spacing: Style.space(6)
+
+                    Text {
+                      text: "Model:"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      color: Qt.darker(Color.foreground, 1.3)
+                    }
+
+                    Button {
+                      Layout.fillWidth: true
+                      text: "Tiny"
+                      tooltipText: "Fastest transcription, low resource usage"
+                      selected: root.whisperModel === "tiny"
+                      onClicked: root.whisperModel = "tiny"
+                    }
+
+                    Button {
+                      Layout.fillWidth: true
+                      text: "Base"
+                      tooltipText: "Recommended balance of accuracy and speed"
+                      selected: root.whisperModel === "base"
+                      onClicked: root.whisperModel = "base"
+                    }
+
+                    Button {
+                      Layout.fillWidth: true
+                      text: "Small"
+                      tooltipText: "Higher accuracy for multi-speaker content"
+                      selected: root.whisperModel === "small"
+                      onClicked: root.whisperModel = "small"
+                    }
+                  }
+                }
+              }
+
+              // When Whisper IS NOT installed: show status, info, and install button
+              Column {
+                width: parent.width
+                visible: !root.whisperAvailable
+                spacing: Style.space(8)
+
                 RowLayout {
                   width: parent.width
-                  spacing: Style.space(6)
 
-                  Text {
-                    text: "Model:"
-                    font.family: Style.font.family
-                    font.pixelSize: Style.font.caption
-                    color: Qt.darker(Color.foreground, 1.3)
-                  }
-
-                  Button {
+                  ColumnLayout {
                     Layout.fillWidth: true
-                    text: "Tiny"
-                    tooltipText: "Fastest transcription, low resource usage"
-                    selected: root.whisperModel === "tiny"
-                    onClicked: root.whisperModel = "tiny"
+                    spacing: Style.space(2)
+
+                    Row {
+                      spacing: Style.space(6)
+                      Text {
+                        text: "󰍬"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        color: Color.urgent
+                      }
+                      Text {
+                        text: "Offline Whisper AI"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                        color: Color.foreground
+                      }
+                    }
+
+                    Text {
+                      text: "Speech-to-text & subtitles require whisper-cpp"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      color: Qt.darker(Color.foreground, 1.4)
+                    }
                   }
 
-                  Button {
-                    Layout.fillWidth: true
-                    text: "Base"
-                    tooltipText: "Recommended balance of accuracy and speed"
-                    selected: root.whisperModel === "base"
-                    onClicked: root.whisperModel = "base"
-                  }
+                  Rectangle {
+                    implicitWidth: notInstTxt.implicitWidth + Style.space(8)
+                    implicitHeight: Style.space(18)
+                    radius: Style.cornerRadius
+                    color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.15)
+                    border.color: Color.urgent
+                    border.width: 1
 
-                  Button {
-                    Layout.fillWidth: true
-                    text: "Small"
-                    tooltipText: "Higher accuracy for multi-speaker content"
-                    selected: root.whisperModel === "small"
-                    onClicked: root.whisperModel = "small"
+                    Text {
+                      id: notInstTxt
+                      anchors.centerIn: parent
+                      text: "Not Installed"
+                      font.family: Style.font.family
+                      font.pixelSize: Style.font.caption
+                      color: Color.urgent
+                    }
                   }
+                }
+
+                Button {
+                  width: parent.width
+                  text: "Install Whisper (whisper-cpp)"
+                  iconText: "󰇚"
+                  selected: true
+                  accent: Color.accent
+                  tooltipText: "Launch terminal to run: omarchy pkg add whisper-cpp"
+                  onClicked: root.installWhisper()
+                }
+
+                Text {
+                  width: parent.width
+                  horizontalAlignment: Text.AlignHCenter
+                  text: "Or run in terminal: omarchy pkg add whisper-cpp"
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  color: Qt.darker(Color.foreground, 1.4)
                 }
               }
             }
@@ -592,6 +695,7 @@ Panel {
           Column {
             width: parent.width
             visible: root.activeJobs.length > 0
+            height: visible ? implicitHeight : 0
             spacing: Style.space(8)
 
             Text {
@@ -709,6 +813,7 @@ Panel {
           Column {
             width: parent.width
             visible: root.historyJobs.length > 0
+            height: visible ? implicitHeight : 0
             spacing: Style.space(8)
 
             RowLayout {
