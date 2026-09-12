@@ -39,6 +39,8 @@ Featuring automatic platform link detection, high-bitrate video/audio extraction
   - History list with one-click media play (`󰐊`) and show-in-folder (`󰉋`) actions.
 - **💻 CLI & Shell IPC**: Complete terminal and script control via `omapony` CLI and `omarchy-shell omapony <action>`.
 
+Powered by your favorite Discord troll Tonythepony ⚡️⚡️ ft. 🍻 Beers Superpowers 💨🔥
+
 ---
 
 ## 📥 Installation
