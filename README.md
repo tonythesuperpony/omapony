@@ -47,6 +47,7 @@ Featuring automatic platform link detection, high-bitrate video/audio extraction
 
 ```bash
 omarchy plugin add https://github.com/tonythesuperpony/omapony.git --enable
+ln -sf ~/.config/omarchy/plugins/omapony/bin/omapony ~/.local/bin/omapony
 ```
 
 ### Manual Installation
@@ -55,6 +56,7 @@ Clone directly into your Omarchy shell plugins directory:
 
 ```bash
 git clone https://github.com/tonythesuperpony/omapony.git ~/.config/omarchy/plugins/omapony
+ln -sf ~/.config/omarchy/plugins/omapony/bin/omapony ~/.local/bin/omapony
 omarchy plugin enable omapony --section right
 ```
 
@@ -122,6 +124,77 @@ omapony status
 # Clear download history
 omapony clear-history
 ```
+
+---
+
+## 🗑️ Uninstallation
+
+To cleanly and completely remove OmaPony from your system:
+
+### 1. Remove the Plugin
+
+Using the Omarchy plugin manager:
+
+```bash
+omarchy plugin remove omapony --yes
+```
+
+Or manually:
+
+```bash
+omarchy plugin disable omapony
+rm -rf ~/.config/omarchy/plugins/omapony
+omarchy-shell shell rescanPlugins
+```
+
+### 2. Remove the CLI Symlink
+
+Remove the command binary symlink from your user PATH:
+
+```bash
+rm -f ~/.local/bin/omapony
+```
+
+### 3. Remove Keybindings
+
+Remove or comment out the OmaPony keybindings in `~/.config/hypr/bindings.lua`:
+
+```lua
+-- Remove or comment out these lines:
+-- o.bind("SUPER + ALT + V", "Download selected video/audio (OmaPony)", "omapony grab")
+-- o.bind("SUPER + SHIFT + V", "Toggle OmaPony downloader", "omarchy-shell omapony toggle")
+```
+
+Then reload your Hyprland configuration (or restart your session).
+
+### 4. Remove Configuration & Cached Models (Optional)
+
+To delete user preferences, download history, and cached Whisper AI GGML models:
+
+```bash
+rm -rf ~/.config/omarchy/omapony ~/.local/share/omarchy/omapony
+```
+
+> **Note**: Your downloaded video and audio files in `~/Videos/OmaPony` and `~/Music/OmaPony` will remain untouched.
+
+### 5. Remove Whisper Dependencies (Optional)
+
+If you installed `whisper-cpp` solely for OmaPony and no longer need it:
+
+```bash
+omarchy pkg remove whisper-cpp
+```
+
+---
+
+### ⚡ Quick Complete Uninstall (One-Liner)
+
+To remove the plugin, CLI binary, configuration, and cached models in one shot:
+
+```bash
+omarchy plugin remove omapony --yes && rm -f ~/.local/bin/omapony && rm -rf ~/.config/omarchy/omapony ~/.local/share/omarchy/omapony
+```
+*(Remember to also remove the keybindings from `~/.config/hypr/bindings.lua`)*
 
 ---
 
