@@ -72,10 +72,14 @@ def push_ipc(event):
         return
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        s.settimeout(0.3)
+        s.settimeout(0.5)
         s.connect(str(sock_path))
         payload = json.dumps(event) + "\n"
         s.sendall(payload.encode("utf-8"))
+        try:
+            s.shutdown(socket.SHUT_WR)
+        except Exception:
+            pass
         s.close()
     except Exception:
         pass
@@ -728,8 +732,9 @@ def cmd_worker(args):
         "yt-dlp",
         "--no-playlist",
         "--newline",
+        "--no-colors",
         "--progress-template",
-        "download:PROG:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s",
+        "download:PROG:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
         "--print", "before_dl:TITLE:%(title)s",
         "--print", "after_move:FINAL:%(filepath)s",
         "-o", out_template
@@ -749,6 +754,8 @@ def cmd_worker(args):
     final_path = ""
     last_ipc_time = 0
     last_disk_time = 0
+    stream_count = 0
+    last_pct = 0.0
     title = job.get("title", "")
     if "Fetching metadata" in title:
         title = ""
@@ -757,56 +764,129 @@ def cmd_worker(args):
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
         for raw_line in proc.stdout:
-            line = raw_line.strip()
-            if line.startswith("TITLE:"):
-                title = line[6:].strip()
+            clean_line = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', raw_line).strip()
+
+            if clean_line.startswith("TITLE:"):
+                title = clean_line[6:].strip()
                 with state_lock():
                     update_job_state(job_id, {"title": title})
                 push_ipc({"type": "reload"})
 
-            elif line.startswith("FINAL:"):
-                final_path = line[6:].strip()
+            elif clean_line.startswith("FINAL:"):
+                final_path = clean_line[6:].strip()
                 with state_lock():
                     update_job_state(job_id, {"output_file": final_path})
 
-            elif "PROG:" in line:
+            elif "Destination:" in clean_line:
+                stream_count += 1
+
+            elif clean_line.startswith("[Merger]") or clean_line.startswith("[ExtractAudio]") or "Merging formats" in clean_line:
+                last_pct = max(last_pct, 98.5)
+                push_ipc({
+                    "type": "progress",
+                    "job_id": job_id,
+                    "progress": last_pct,
+                    "speed": "Processing...",
+                    "eta": "finishing",
+                    "title": title
+                })
+                with state_lock():
+                    update_job_state(job_id, {
+                        "progress": last_pct,
+                        "speed": "Processing...",
+                        "eta": "finishing"
+                    })
+
+            elif "PROG:" in clean_line:
                 try:
-                    parts = line.split("PROG:")[1].split("|")
-                    pct_str = parts[0].replace("%", "").strip()
-                    pct = float(pct_str) if pct_str else 0.0
+                    parts = clean_line.split("PROG:")[1].split("|")
+                    pct_raw = re.sub(r'[^0-9.]', '', parts[0]) if len(parts) > 0 else ""
                     spd = parts[1].strip() if len(parts) > 1 else "--"
                     eta = parts[2].strip() if len(parts) > 2 else "--"
                     dl_b = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
                     tot_b = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
+                    tot_est = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+
+                    raw_pct = float(pct_raw) if pct_raw else 0.0
+                    effective_total = tot_b if tot_b > 0 else tot_est
+                    if raw_pct <= 0.0 and effective_total > 0 and dl_b > 0:
+                        raw_pct = min(99.0, (dl_b / effective_total) * 100.0)
+
+                    # Multi-stream scaling: stream 1 (video) 0->85%, stream 2 (audio) 85->98%
+                    if job["format"] == "video":
+                        if stream_count <= 1:
+                            scaled_pct = raw_pct * 0.85
+                        elif stream_count == 2:
+                            scaled_pct = 85.0 + (raw_pct * 0.13)
+                        else:
+                            scaled_pct = 98.0 + (raw_pct * 0.01)
+                    else:
+                        scaled_pct = raw_pct * 0.98
+
+                    scaled_pct = max(last_pct, min(99.0, scaled_pct))
+                    last_pct = scaled_pct
 
                     now = time.time()
-                    # Push IPC near-instantly every 150ms
-                    if now - last_ipc_time >= 0.15 or pct >= 100.0:
+                    if now - last_ipc_time >= 0.10 or scaled_pct >= 99.0:
                         last_ipc_time = now
                         push_ipc({
                             "type": "progress",
                             "job_id": job_id,
-                            "progress": pct,
+                            "progress": scaled_pct,
                             "speed": spd,
                             "eta": eta,
                             "downloaded_bytes": dl_b,
-                            "total_bytes": tot_b,
+                            "total_bytes": effective_total,
                             "title": title
                         })
 
-                    # Throttle state.json disk writes to every 1.5s
-                    if now - last_disk_time >= 1.5 or pct >= 100.0:
+                    if now - last_disk_time >= 0.40 or scaled_pct >= 99.0:
                         last_disk_time = now
                         with state_lock():
                             update_job_state(job_id, {
-                                "progress": pct,
+                                "progress": scaled_pct,
                                 "speed": spd,
                                 "eta": eta,
                                 "downloaded_bytes": dl_b,
-                                "total_bytes": tot_b
+                                "total_bytes": effective_total
                             })
                 except Exception:
                     pass
+
+            elif clean_line.startswith("[download]") and "%" in clean_line:
+                # Fallback parser for standard yt-dlp progress lines
+                m = re.search(r'([0-9.]+)%\s+of\s+([~0-9.a-zA-Z]+)\s+at\s+([0-9.a-zA-Z/]+)\s+ETA\s+([0-9:]+)', clean_line)
+                if m:
+                    try:
+                        raw_pct = float(m.group(1))
+                        spd = m.group(3)
+                        eta = m.group(4)
+                        if job["format"] == "video":
+                            if stream_count <= 1:
+                                scaled_pct = raw_pct * 0.85
+                            elif stream_count == 2:
+                                scaled_pct = 85.0 + (raw_pct * 0.13)
+                            else:
+                                scaled_pct = 98.0 + (raw_pct * 0.01)
+                        else:
+                            scaled_pct = raw_pct * 0.98
+
+                        scaled_pct = max(last_pct, min(99.0, scaled_pct))
+                        last_pct = scaled_pct
+
+                        now = time.time()
+                        if now - last_ipc_time >= 0.10:
+                            last_ipc_time = now
+                            push_ipc({
+                                "type": "progress",
+                                "job_id": job_id,
+                                "progress": scaled_pct,
+                                "speed": spd,
+                                "eta": eta,
+                                "title": title
+                            })
+                    except Exception:
+                        pass
 
         proc.wait()
 

@@ -67,10 +67,10 @@ Panel {
     }
   }
 
-  // Low-overhead fallback heartbeat timer (near-instant updates are handled via push IPC socket)
+  // Low-overhead fallback heartbeat timer
   Timer {
-    interval: 10000
-    running: root.opened
+    interval: 1000
+    running: root.opened && root.hasActiveDownloads
     repeat: true
     onTriggered: stateFile.reload()
   }
@@ -96,6 +96,8 @@ Panel {
     onFileChanged: reload()
   }
 
+  property var liveProgress: ({})
+
   function handleIpcMessage(line) {
     try {
       if (!line || line.trim() === "") return
@@ -113,31 +115,40 @@ Panel {
   }
 
   function updateJobProgress(jobId, pct, spd, eta, title) {
-    if (!root.stateData || !root.stateData.active) return
-    var list = root.stateData.active
-    var changed = false
-    for (var i = 0; i < list.length; i++) {
-      if (list[i].id === jobId) {
-        list[i].progress = pct
-        if (spd) list[i].speed = spd
-        if (eta) list[i].eta = eta
-        if (title && (!list[i].title || list[i].title.indexOf("Fetching metadata") !== -1)) {
-          list[i].title = title
-        }
-        list[i].status = "downloading"
-        changed = true
-        break
-      }
+    var copy = Object.assign({}, root.liveProgress)
+    var cur = copy[jobId] || {}
+    copy[jobId] = {
+      progress: (pct !== undefined && pct !== null) ? pct : (cur.progress || 0),
+      speed: spd || cur.speed || "--",
+      eta: eta || cur.eta || "--",
+      title: title || cur.title || "",
+      status: "downloading"
     }
-    if (changed) {
-      root.stateData = Object.assign({}, root.stateData, { active: list.slice(0) })
-    }
+    root.liveProgress = copy
   }
 
   function loadState(raw) {
     try {
       if (raw && raw.trim() !== "") {
-        root.stateData = JSON.parse(raw)
+        var parsed = JSON.parse(raw)
+        root.stateData = parsed
+        if (parsed.active) {
+          var copy = Object.assign({}, root.liveProgress)
+          for (var i = 0; i < parsed.active.length; i++) {
+            var j = parsed.active[i]
+            if (j.id) {
+              var cur = copy[j.id] || {}
+              copy[j.id] = {
+                progress: (j.progress !== undefined && j.progress > 0) ? j.progress : (cur.progress || 0),
+                speed: (j.speed && j.speed !== "--") ? j.speed : (cur.speed || "--"),
+                eta: (j.eta && j.eta !== "--") ? j.eta : (cur.eta || "--"),
+                title: j.title || cur.title || "",
+                status: j.status || cur.status || "downloading"
+              }
+            }
+          }
+          root.liveProgress = copy
+        }
       }
     } catch (e) {
       console.warn("omapony: failed to parse state JSON", e)
@@ -246,7 +257,7 @@ Panel {
     Text {
       anchors.centerIn: parent
       anchors.horizontalCenterOffset: root.hasActiveDownloads ? 0 : 3.17
-      anchors.verticalCenterOffset: root.hasActiveDownloads ? 0 : 3.0
+      anchors.verticalCenterOffset: root.hasActiveDownloads ? 0 : 3.1
       text: root.hasActiveDownloads ? "󰑋" : "\uf7ab"
       font.family: root.hasActiveDownloads ? (root.bar ? root.bar.fontFamily : Style.font.family) : "Font Awesome 7 Free Solid"
       font.styleName: root.hasActiveDownloads ? "" : "Solid"
@@ -795,6 +806,13 @@ Panel {
 
               delegate: Rectangle {
                 required property var modelData
+                readonly property var liveData: (root.liveProgress && modelData && modelData.id) ? (root.liveProgress[modelData.id] || modelData) : modelData
+                readonly property real jobProgress: liveData && liveData.progress !== undefined ? liveData.progress : (modelData.progress || 0)
+                readonly property string jobSpeed: liveData && liveData.speed ? liveData.speed : (modelData.speed || "--")
+                readonly property string jobEta: liveData && liveData.eta ? liveData.eta : (modelData.eta || "--")
+                readonly property string jobTitle: liveData && liveData.title ? liveData.title : (modelData.title || modelData.url || "")
+                readonly property string jobStatus: liveData && liveData.status ? liveData.status : (modelData.status || "downloading")
+
                 width: mainColumn.width
                 implicitHeight: activeCol.implicitHeight + Style.space(16)
                 radius: Style.cornerRadius
@@ -822,7 +840,7 @@ Panel {
 
                     Text {
                       Layout.fillWidth: true
-                      text: modelData.title || modelData.url
+                      text: jobTitle || modelData.title || modelData.url
                       elide: Text.ElideRight
                       font.family: Style.font.family
                       font.pixelSize: Style.font.body
@@ -832,7 +850,7 @@ Panel {
 
                     // Queued badge
                     Rectangle {
-                      visible: modelData.status === "queued"
+                      visible: jobStatus === "queued"
                       implicitWidth: queueTxt.implicitWidth + Style.space(8)
                       implicitHeight: Style.space(18)
                       radius: Style.cornerRadius
@@ -876,16 +894,16 @@ Panel {
                   // Galloping Pony tracking download progress
                   Item {
                     width: parent.width
-                    height: Style.space(24)
-                    visible: modelData.status === "downloading" || modelData.status === "processing"
+                    height: Style.space(26)
+                    visible: jobStatus === "downloading" || jobStatus === "processing"
 
                     Item {
-                      width: Style.space(32)
-                      height: Style.space(23)
-                      x: Math.max(0, Math.min(parent.width - width, (parent.width - width) * ((modelData.progress || 0) / 100.0)))
+                      width: Style.space(34)
+                      height: Style.space(25)
+                      x: Math.max(0, Math.min(parent.width - width, (parent.width - width) * (jobProgress / 100.0)))
 
                       Behavior on x {
-                        NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
+                        NumberAnimation { duration: 120; easing.type: Easing.OutQuad }
                       }
 
                       AnimatedSprite {
@@ -898,7 +916,7 @@ Panel {
                         frameY: 0
                         frameRate: 12
                         interpolate: false
-                        running: root.opened && (modelData.status === "downloading" || modelData.status === "processing")
+                        running: root.opened && (jobStatus === "downloading" || jobStatus === "processing")
                         loops: AnimatedSprite.Infinite
                       }
                     }
@@ -913,7 +931,7 @@ Panel {
 
                     Rectangle {
                       height: parent.height
-                      width: modelData.status === "queued" ? 0 : Math.max(0, Math.min(parent.width, parent.width * ((modelData.progress || 0) / 100.0)))
+                      width: jobStatus === "queued" ? 0 : Math.max(0, Math.min(parent.width, parent.width * (jobProgress / 100.0)))
                       radius: Style.space(3)
                       color: Color.accent
 
@@ -929,16 +947,18 @@ Panel {
 
                     Text {
                       Layout.fillWidth: true
-                      text: modelData.status === "queued"
+                      text: jobStatus === "queued"
                         ? "󰄱 Queued (waiting for worker slot)..."
-                        : (modelData.status === "transcribing"
+                        : (jobStatus === "transcribing"
                           ? "󰍬 Transcribing offline with Whisper..."
-                          : ((modelData.progress ? (modelData.progress.toFixed(1) + "%") : "0%") +
-                             (modelData.speed && modelData.speed !== "--" ? (" • " + modelData.speed) : "") +
-                             (modelData.eta && modelData.eta !== "--" ? (" • ETA " + modelData.eta) : "")))
+                          : (jobStatus === "processing"
+                            ? ("󰑋 Processing media (" + jobProgress.toFixed(1) + "%)" + (jobSpeed !== "--" ? (" • " + jobSpeed) : ""))
+                            : ((jobProgress > 0 ? (jobProgress.toFixed(1) + "%") : "0%") +
+                               (jobSpeed && jobSpeed !== "--" ? (" • " + jobSpeed) : "") +
+                               (jobEta && jobEta !== "--" ? (" • ETA " + jobEta) : ""))))
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
-                      color: modelData.status === "queued" ? Color.accent : Qt.darker(Color.foreground, 1.3)
+                      color: jobStatus === "queued" ? Color.accent : Qt.darker(Color.foreground, 1.3)
                     }
                   }
                 }
