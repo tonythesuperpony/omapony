@@ -243,42 +243,17 @@ Panel {
 
   Component {
     id: horseHeadIconComponent
-    Item {
+    Text {
       anchors.centerIn: parent
-      implicitWidth: root.hasActiveDownloads ? Style.space(28) : Style.space(16)
-      implicitHeight: Style.space(20)
-
-      // When Idle: classic Font Awesome horse head icon
-      Text {
-        visible: !root.hasActiveDownloads
-        anchors.centerIn: parent
-        anchors.horizontalCenterOffset: 3.17
-        anchors.verticalCenterOffset: 3.0
-        text: "\uf7ab"
-        font.family: "Font Awesome 7 Free Solid"
-        font.styleName: "Solid"
-        font.pixelSize: 10
-        color: button.active && button.useActiveColor ? button.activeColor : button.foreground
-        renderType: Text.NativeRendering
-      }
-
-      // When Downloading: animated galloping pony sprite!
-      AnimatedSprite {
-        visible: root.hasActiveDownloads
-        anchors.centerIn: parent
-        width: Style.space(26)
-        height: Style.space(19)
-        source: Qt.resolvedUrl("assets/caballoNormal.png")
-        frameWidth: 111
-        frameHeight: 81
-        frameCount: 7
-        frameX: 0
-        frameY: 0
-        frameRate: 12
-        interpolate: false
-        running: root.hasActiveDownloads
-        loops: AnimatedSprite.Infinite
-      }
+      anchors.horizontalCenterOffset: root.hasActiveDownloads ? 0 : 3.17
+      anchors.verticalCenterOffset: root.hasActiveDownloads ? 0 : 3.0
+      text: root.hasActiveDownloads ? "󰑋" : "\uf7ab"
+      font.family: root.hasActiveDownloads ? (root.bar ? root.bar.fontFamily : Style.font.family) : "Font Awesome 7 Free Solid"
+      font.styleName: root.hasActiveDownloads ? "" : "Solid"
+      font.pixelSize: root.hasActiveDownloads ? Style.bar.iconFont : 9.7
+      color: button.active && button.useActiveColor ? button.activeColor : button.foreground
+      renderType: Text.NativeRendering
+      rotation: root.hasActiveDownloads ? root.spinnerAngle : 0
     }
   }
 
