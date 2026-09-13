@@ -31,11 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Delivers fluid, near-instant progress bar animations, live transfer speeds, and ETA ticks with zero polling lag and minimal CPU/disk I/O.
   - Preserves low-overhead fallback timer for background state resilience.
 
-- **Animated Galloping Pony Sprite Sheet Integration**:
-  - Integrated `caballoNormal.png` sprite sheet (777x243 px, 7 columns x 3 rows with 111x81 px frames) using native QtQuick `AnimatedSprite`.
-  - The modal panel header badge displays the pony galloping at full stride during active downloads.
-  - In each active download card, the galloping pony animates smoothly right along the progress bar tracking download completion.
-
 - **Calibrated Bar Icon Optical Alignment**:
   - Calibrated the standard Font Awesome horse head icon (`\uf7ab`) optical offsets to align sub-pixel perfectly with neighboring system indicators (network, audio, and display).
 
