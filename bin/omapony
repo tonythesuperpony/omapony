@@ -157,10 +157,10 @@ def load_state():
 
 def save_state(st):
     try:
-        tmp = STATE_FILE.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(st, f, indent=2)
-        tmp.replace(STATE_FILE)
+        content = json.dumps(st, indent=2)
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
     except Exception as e:
         print(f"Error saving state: {e}", file=sys.stderr)
 
@@ -733,9 +733,9 @@ def cmd_worker(args):
         "--no-playlist",
         "--newline",
         "--no-colors",
+        "--progress",
         "--progress-template",
-        "download:PROG:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s",
-        "--print", "before_dl:TITLE:%(title)s",
+        "download:PROG:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(info.format_id)s|%(info.vcodec)s|%(info.acodec)s|%(info.title)s",
         "--print", "after_move:FINAL:%(filepath)s",
         "-o", out_template
     ]
@@ -747,49 +747,68 @@ def cmd_worker(args):
 
     cmd.append(job["url"])
 
+    start_time = time.time()
     with state_lock():
-        update_job_state(job_id, {"status": "downloading", "pid": os.getpid()})
-    push_ipc({"type": "reload"})
+        update_job_state(job_id, {
+            "status": "downloading",
+            "progress": 2.0,
+            "speed": "Connecting...",
+            "eta": "--",
+            "pid": os.getpid()
+        })
 
     final_path = ""
-    last_ipc_time = 0
     last_disk_time = 0
-    stream_count = 0
-    last_pct = 0.0
+    saw_video_stream = False
+    last_video_pct = 2.0
+    last_audio_pct = 85.0
+    last_general_pct = 2.0
+    last_pct = 2.0
     title = job.get("title", "")
     if "Fetching metadata" in title:
         title = ""
 
+    recent_lines = []
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
 
         for raw_line in proc.stdout:
             clean_line = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', raw_line).strip()
+            if clean_line:
+                recent_lines.append(clean_line)
+                if len(recent_lines) > 25:
+                    recent_lines.pop(0)
 
-            if clean_line.startswith("TITLE:"):
-                title = clean_line[6:].strip()
-                with state_lock():
-                    update_job_state(job_id, {"title": title})
-                push_ipc({"type": "reload"})
-
-            elif clean_line.startswith("FINAL:"):
+            if clean_line.startswith("FINAL:"):
                 final_path = clean_line[6:].strip()
+                last_pct = max(last_pct, 99.0)
                 with state_lock():
-                    update_job_state(job_id, {"output_file": final_path})
+                    update_job_state(job_id, {
+                        "output_file": final_path,
+                        "progress": 99.0,
+                        "speed": "Finalizing...",
+                        "eta": "0s"
+                    })
+
+            elif "has already been downloaded" in clean_line:
+                m = re.search(r'\[download\]\s+(.+?)\s+has already been downloaded', clean_line)
+                if m:
+                    final_path = m.group(1).strip()
+                    last_pct = 100.0
 
             elif "Destination:" in clean_line:
-                stream_count += 1
+                parts = clean_line.split("Destination:", 1)
+                dest = parts[1].strip() if len(parts) > 1 else ""
+                if dest and not dest.endswith(".part") and not final_path:
+                    final_path = dest
+
+            elif "Merging formats into" in clean_line:
+                m = re.search(r'Merging formats into ["\'](.+?)["\']', clean_line)
+                if m:
+                    final_path = m.group(1).strip()
 
             elif clean_line.startswith("[Merger]") or clean_line.startswith("[ExtractAudio]") or "Merging formats" in clean_line:
                 last_pct = max(last_pct, 98.5)
-                push_ipc({
-                    "type": "progress",
-                    "job_id": job_id,
-                    "progress": last_pct,
-                    "speed": "Processing...",
-                    "eta": "finishing",
-                    "title": title
-                })
                 with state_lock():
                     update_job_state(job_id, {
                         "progress": last_pct,
@@ -806,49 +825,62 @@ def cmd_worker(args):
                     dl_b = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
                     tot_b = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
                     tot_est = int(parts[5]) if len(parts) > 5 and parts[5].isdigit() else 0
+                    fmt_id = parts[6].strip() if len(parts) > 6 else ""
+                    vcodec = parts[7].strip() if len(parts) > 7 else ""
+                    acodec = parts[8].strip() if len(parts) > 8 else ""
+                    parsed_title = "|".join(parts[9:]).strip() if len(parts) > 9 else ""
+
+                    if parsed_title and parsed_title != "NA" and not title:
+                        title = parsed_title
 
                     raw_pct = float(pct_raw) if pct_raw else 0.0
                     effective_total = tot_b if tot_b > 0 else tot_est
                     if raw_pct <= 0.0 and effective_total > 0 and dl_b > 0:
                         raw_pct = min(99.0, (dl_b / effective_total) * 100.0)
+                    elif raw_pct <= 0.0 and dl_b > 0:
+                        import math
+                        raw_pct = min(90.0, 5.0 + math.log10(max(1, dl_b / 10000)) * 22.0)
 
-                    # Multi-stream scaling: stream 1 (video) 0->85%, stream 2 (audio) 85->98%
+                    # Guard against DASH init fragment reporting 100% on <100KB
+                    if raw_pct >= 99.0 and dl_b > 0 and dl_b < 100000:
+                        raw_pct = 0.5
+
+                    # Multi-stream scaling:
+                    is_audio_stream = (vcodec == 'none' or 'audio' in fmt_id.lower()) and acodec != 'none'
                     if job["format"] == "video":
-                        if stream_count <= 1:
-                            scaled_pct = raw_pct * 0.85
-                        elif stream_count == 2:
-                            scaled_pct = 85.0 + (raw_pct * 0.13)
-                        else:
-                            scaled_pct = 98.0 + (raw_pct * 0.01)
-                    else:
-                        scaled_pct = raw_pct * 0.98
+                        if not is_audio_stream and vcodec != 'none':
+                            saw_video_stream = True
 
-                    scaled_pct = max(last_pct, min(99.0, scaled_pct))
-                    last_pct = scaled_pct
+                        if is_audio_stream and saw_video_stream:
+                            # Audio stream following video stream: scales from 85% to 97%
+                            scaled_pct = 85.0 + (raw_pct * 0.12)
+                            last_audio_pct = max(last_audio_pct, scaled_pct)
+                            scaled_pct = last_audio_pct
+                        else:
+                            # Video stream: scales from 2% to 85%
+                            scaled_pct = 2.0 + (raw_pct * 0.83)
+                            last_video_pct = max(last_video_pct, scaled_pct)
+                            scaled_pct = last_video_pct
+                    else:
+                        # Audio-only download: scales from 2% to 97%
+                        scaled_pct = 2.0 + (raw_pct * 0.95)
+                        last_general_pct = max(last_general_pct, scaled_pct)
+                        scaled_pct = last_general_pct
+
+                    scaled_pct = min(99.0, scaled_pct)
+                    last_pct = max(last_pct, scaled_pct)
 
                     now = time.time()
-                    if now - last_ipc_time >= 0.10 or scaled_pct >= 99.0:
-                        last_ipc_time = now
-                        push_ipc({
-                            "type": "progress",
-                            "job_id": job_id,
-                            "progress": scaled_pct,
-                            "speed": spd,
-                            "eta": eta,
-                            "downloaded_bytes": dl_b,
-                            "total_bytes": effective_total,
-                            "title": title
-                        })
-
-                    if now - last_disk_time >= 0.40 or scaled_pct >= 99.0:
+                    if now - last_disk_time >= 0.10 or scaled_pct >= 99.0:
                         last_disk_time = now
                         with state_lock():
                             update_job_state(job_id, {
-                                "progress": scaled_pct,
+                                "progress": round(scaled_pct, 1),
                                 "speed": spd,
                                 "eta": eta,
                                 "downloaded_bytes": dl_b,
-                                "total_bytes": effective_total
+                                "total_bytes": effective_total,
+                                "title": title or job.get("title", "")
                             })
                 except Exception:
                     pass
@@ -863,50 +895,70 @@ def cmd_worker(args):
                         eta = m.group(4)
                         if job["format"] == "video":
                             if stream_count <= 1:
-                                scaled_pct = raw_pct * 0.85
+                                scaled_pct = max(3.0, raw_pct * 0.85)
                             elif stream_count == 2:
                                 scaled_pct = 85.0 + (raw_pct * 0.13)
                             else:
                                 scaled_pct = 98.0 + (raw_pct * 0.01)
                         else:
-                            scaled_pct = raw_pct * 0.98
+                            scaled_pct = max(3.0, raw_pct * 0.98)
 
                         scaled_pct = max(last_pct, min(99.0, scaled_pct))
                         last_pct = scaled_pct
 
                         now = time.time()
-                        if now - last_ipc_time >= 0.10:
-                            last_ipc_time = now
-                            push_ipc({
-                                "type": "progress",
-                                "job_id": job_id,
-                                "progress": scaled_pct,
-                                "speed": spd,
-                                "eta": eta,
-                                "title": title
-                            })
+                        if now - last_disk_time >= 0.10 or scaled_pct >= 99.0:
+                            last_disk_time = now
+                            with state_lock():
+                                update_job_state(job_id, {
+                                    "progress": round(scaled_pct, 1),
+                                    "speed": spd,
+                                    "eta": eta,
+                                    "title": title or job.get("title", "")
+                                })
                     except Exception:
                         pass
 
         proc.wait()
 
         if proc.returncode != 0:
-            err = f"yt-dlp exited with code {proc.returncode}"
+            err_line = next((l for l in reversed(recent_lines) if "error" in l.lower()), None) or (recent_lines[-1] if recent_lines else "unknown error")
+            err = f"yt-dlp error (code {proc.returncode}): {err_line}"
             with state_lock():
                 update_job_state(job_id, {"status": "error", "error_message": err})
-            notify("OmaPony", f"Failed to download {title or job['url']}", urgency="critical", icon="dialog-error")
-            push_ipc({"type": "reload"})
+            notify("OmaPony", f"Failed to download {title or job['url']}: {err_line}", urgency="critical", icon="dialog-error")
             process_queue()
             return
 
         if not final_path or not Path(final_path).exists():
-            files = sorted(out_dir.glob("*"), key=lambda f: f.stat().st_mtime, reverse=True)
-            if files:
-                final_path = str(files[0])
+            url_val = job.get("url", "")
+            id_match = re.search(r'(?:v=|youtu\.be/|videos/|reel/|p/)([a-zA-Z0-9_-]+)', url_val)
+            cand_id = id_match.group(1) if id_match else ""
+            matches = [f for f in out_dir.glob(f"*{cand_id}*") if f.is_file() and not f.name.endswith(".part")] if cand_id else []
+            if matches:
+                matches.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                final_path = str(matches[0])
+            else:
+                cutoff = time.time() - 120
+                recent = [f for f in out_dir.glob("*") if f.is_file() and not f.name.endswith(".part") and f.stat().st_mtime >= cutoff]
+                if recent:
+                    recent.sort(key=lambda f: f.stat().st_mtime, reverse=True)
+                    final_path = str(recent[0])
 
         should_transcribe = bool(job.get("transcribe")) and bool(final_path)
 
-        # Move to history IMMEDIATELY so user can access downloaded media right away
+        # Set job as completed 100% in active list so user sees full completion & horse at finish line
+        with state_lock():
+            update_job_state(job_id, {
+                "status": "completed",
+                "progress": 100.0,
+                "speed": "Complete",
+                "eta": "0s",
+                "output_file": final_path,
+                "title": title or Path(final_path).name
+            })
+
+        # Add to history immediately
         with state_lock():
             state = load_state()
             history_entry = {
@@ -927,12 +979,9 @@ def cmd_worker(args):
                 "file_size": f"{Path(final_path).stat().st_size / (1024*1024):.1f} MB" if final_path and Path(final_path).exists() else "",
                 "completed_at": int(time.time())
             }
-            state["active"] = [j for j in state.get("active", []) if j.get("id") != job_id]
             state.setdefault("history", []).insert(0, history_entry)
             state["history"] = state["history"][:50]
             save_state(state)
-
-        push_ipc({"type": "reload"})
 
         # Completion notification
         notify(
@@ -941,10 +990,10 @@ def cmd_worker(args):
             icon="video-x-generic"
         )
 
-        # Immediately free queue slot so next download begins without waiting for Whisper
+        # Immediately free queue slot so next download begins without waiting
         process_queue()
 
-        # Detached background transcription
+        # Detached background transcription if enabled
         if should_transcribe:
             spawn_transcribe_worker(
                 job_id=job_id,
@@ -953,6 +1002,14 @@ def cmd_worker(args):
                 subtitles=job.get("subtitles", True),
                 title=title or Path(final_path).name
             )
+
+        # Hold the 100% completed card for 1.2s so the user clearly sees full completion & horse at finish line
+        time.sleep(1.2)
+        with state_lock():
+            state = load_state()
+            state["active"] = [j for j in state.get("active", []) if j.get("id") != job_id]
+            save_state(state)
+        return
 
     except Exception as e:
         with state_lock():

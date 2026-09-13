@@ -10,11 +10,31 @@ import qs.Ui
 Panel {
   id: root
   moduleName: "omapony"
-  ipcTarget: "omapony"
-  manageIpc: true
+  ipcTarget: ""
+  manageIpc: false
+
+  IpcHandler {
+    target: "omapony"
+
+    function open(): void { root.open() }
+    function close(): void { root.close() }
+    function show(): void { root.open() }
+    function hide(): void { root.close() }
+    function toggle(): void { root.toggle() }
+    function reload(): void {
+      console.log("[omapony-debug] IPC reload invoked!")
+      stateFile.reload()
+    }
+    function progress(payload: string): void {
+      console.log("[omapony-debug] IPC progress invoked: " + payload)
+      root.handleIpcMessage(payload)
+    }
+  }
 
   implicitWidth: button.implicitWidth
   implicitHeight: button.implicitHeight
+
+
 
   // State
   readonly property string statePath: Quickshell.env("HOME") + "/.local/share/omarchy/omapony/state.json"
@@ -26,10 +46,69 @@ Panel {
   property var stateData: ({ "active": [], "history": [], "whisper_available": false, "whisper_engine": "none" })
   readonly property var activeJobs: stateData && stateData.active ? stateData.active : []
   readonly property var historyJobs: stateData && stateData.history ? stateData.history : []
-  readonly property int activeDownloadsCount: activeJobs.length
+  readonly property int activeDownloadsCount: activeJobsModel.count
   readonly property bool hasActiveDownloads: activeDownloadsCount > 0
   readonly property bool whisperAvailable: stateData && stateData.whisper_available === true
   readonly property string whisperEngine: stateData && stateData.whisper_engine ? stateData.whisper_engine : "none"
+
+  ListModel {
+    id: activeJobsModel
+  }
+
+  function syncActiveModel(jobs) {
+    if (!jobs) jobs = []
+    var existingMap = {}
+    for (var i = 0; i < activeJobsModel.count; i++) {
+      var it = activeJobsModel.get(i)
+      existingMap[it.jobId] = i
+    }
+
+    var incomingIds = {}
+    for (var j = 0; j < jobs.length; j++) {
+      var job = jobs[j]
+      var jid = String(job.id || "")
+      if (!jid) continue
+      incomingIds[jid] = true
+      var p = (job.progress !== undefined && job.progress !== null) ? Number(job.progress) : 0
+      var s = String(job.speed || "--")
+      var e = String(job.eta || "--")
+      var t = String(job.title || job.url || "")
+      var st = String(job.status || "downloading")
+      var fmt = String(job.format || "video")
+      var p_icon = String(job.platform_icon || "")
+      var p_col = String(job.platform_color || "")
+
+      if (existingMap[jid] !== undefined) {
+        var idx = existingMap[jid]
+        activeJobsModel.setProperty(idx, "jobProgress", p)
+        activeJobsModel.setProperty(idx, "jobSpeed", s)
+        activeJobsModel.setProperty(idx, "jobEta", e)
+        activeJobsModel.setProperty(idx, "jobTitle", t)
+        activeJobsModel.setProperty(idx, "jobStatus", st)
+        activeJobsModel.setProperty(idx, "jobFormat", fmt)
+        activeJobsModel.setProperty(idx, "jobPlatformIcon", p_icon)
+        activeJobsModel.setProperty(idx, "jobPlatformColor", p_col)
+      } else {
+        activeJobsModel.append({
+          "jobId": jid,
+          "jobProgress": p,
+          "jobSpeed": s,
+          "jobEta": e,
+          "jobTitle": t,
+          "jobStatus": st,
+          "jobFormat": fmt,
+          "jobPlatformIcon": p_icon,
+          "jobPlatformColor": p_col
+        })
+      }
+    }
+
+    for (var k = activeJobsModel.count - 1; k >= 0; k--) {
+      if (!incomingIds[activeJobsModel.get(k).jobId]) {
+        activeJobsModel.remove(k)
+      }
+    }
+  }
 
   // User input & options
   property string selectedFormat: "video" // "video" or "audio"
@@ -50,27 +129,13 @@ Panel {
     onTriggered: root.spinnerAngle = (root.spinnerAngle + 30) % 360
   }
 
-  // Push IPC Socket Server: receives near-instant progress & state pushes from workers
-  SocketServer {
-    id: ipcServer
-    path: root.socketPath
-    active: true
-    handler: Component {
-      Socket {
-        parser: SplitParser {
-          splitMarker: "\n"
-          onRead: function(line) {
-            root.handleIpcMessage(line)
-          }
-        }
-      }
-    }
-  }
-
-  // Low-overhead fallback heartbeat timer
+  // Fast and smooth refresh timer:
+  // When panel is opened: ticks every 100ms for ultra-responsive 10 FPS progress bar & pony gallop
+  // When closed with active downloads: ticks every 500ms to keep bar icon spinner rotating
+  // When idle & closed: stopped (0% CPU)
   Timer {
-    interval: 1000
-    running: root.opened && root.hasActiveDownloads
+    interval: root.opened ? 100 : (root.hasActiveDownloads ? 500 : 2000)
+    running: root.opened || root.hasActiveDownloads
     repeat: true
     onTriggered: stateFile.reload()
   }
@@ -89,42 +154,10 @@ Panel {
     id: stateFile
     path: root.statePath
     watchChanges: true
-    atomicWrites: true
     printErrors: false
     onLoaded: root.loadState(text())
     onLoadFailed: root.loadState("{}")
     onFileChanged: reload()
-  }
-
-  property var liveProgress: ({})
-
-  function handleIpcMessage(line) {
-    try {
-      if (!line || line.trim() === "") return
-      var msg = JSON.parse(line.trim())
-      if (msg.type === "progress") {
-        updateJobProgress(msg.job_id, msg.progress, msg.speed, msg.eta, msg.title)
-      } else if (msg.type === "reload") {
-        stateFile.reload()
-      } else if (msg.type === "state" && msg.data) {
-        root.stateData = msg.data
-      }
-    } catch (e) {
-      // Ignore malformed push lines
-    }
-  }
-
-  function updateJobProgress(jobId, pct, spd, eta, title) {
-    var copy = Object.assign({}, root.liveProgress)
-    var cur = copy[jobId] || {}
-    copy[jobId] = {
-      progress: (pct !== undefined && pct !== null) ? pct : (cur.progress || 0),
-      speed: spd || cur.speed || "--",
-      eta: eta || cur.eta || "--",
-      title: title || cur.title || "",
-      status: "downloading"
-    }
-    root.liveProgress = copy
   }
 
   function loadState(raw) {
@@ -132,28 +165,13 @@ Panel {
       if (raw && raw.trim() !== "") {
         var parsed = JSON.parse(raw)
         root.stateData = parsed
-        if (parsed.active) {
-          var copy = Object.assign({}, root.liveProgress)
-          for (var i = 0; i < parsed.active.length; i++) {
-            var j = parsed.active[i]
-            if (j.id) {
-              var cur = copy[j.id] || {}
-              copy[j.id] = {
-                progress: (j.progress !== undefined && j.progress > 0) ? j.progress : (cur.progress || 0),
-                speed: (j.speed && j.speed !== "--") ? j.speed : (cur.speed || "--"),
-                eta: (j.eta && j.eta !== "--") ? j.eta : (cur.eta || "--"),
-                title: j.title || cur.title || "",
-                status: j.status || cur.status || "downloading"
-              }
-            }
-          }
-          root.liveProgress = copy
-        }
+        root.syncActiveModel(parsed.active || [])
       }
     } catch (e) {
       console.warn("omapony: failed to parse state JSON", e)
     }
   }
+
 
   function detectPlatform(url) {
     if (!url) return null
@@ -789,12 +807,12 @@ Panel {
           // ------------------------------------------------------------- Active Downloads
           Column {
             width: parent.width
-            visible: root.activeJobs.length > 0
+            visible: activeJobsModel.count > 0
             height: visible ? implicitHeight : 0
             spacing: Style.space(8)
 
             Text {
-              text: "Active Downloads (" + root.activeJobs.length + ")"
+              text: "Active Downloads (" + activeJobsModel.count + ")"
               font.family: Style.font.family
               font.pixelSize: Style.font.body
               font.bold: true
@@ -802,22 +820,24 @@ Panel {
             }
 
             Repeater {
-              model: root.activeJobs
+              model: activeJobsModel
 
               delegate: Rectangle {
-                required property var modelData
-                readonly property var liveData: (root.liveProgress && modelData && modelData.id) ? (root.liveProgress[modelData.id] || modelData) : modelData
-                readonly property real jobProgress: liveData && liveData.progress !== undefined ? liveData.progress : (modelData.progress || 0)
-                readonly property string jobSpeed: liveData && liveData.speed ? liveData.speed : (modelData.speed || "--")
-                readonly property string jobEta: liveData && liveData.eta ? liveData.eta : (modelData.eta || "--")
-                readonly property string jobTitle: liveData && liveData.title ? liveData.title : (modelData.title || modelData.url || "")
-                readonly property string jobStatus: liveData && liveData.status ? liveData.status : (modelData.status || "downloading")
+                required property string jobId
+                required property real jobProgress
+                required property string jobSpeed
+                required property string jobEta
+                required property string jobTitle
+                required property string jobStatus
+                required property string jobFormat
+                required property string jobPlatformIcon
+                required property string jobPlatformColor
 
                 width: mainColumn.width
                 implicitHeight: activeCol.implicitHeight + Style.space(16)
                 radius: Style.cornerRadius
                 color: Style.selectedFillFor(Color.foreground, Color.accent)
-                border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3)
+                border.color: jobStatus === "completed" ? Qt.rgba(0.3, 0.8, 0.4, 0.5) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3)
                 border.width: 1
 
                 Column {
@@ -831,21 +851,41 @@ Panel {
                     spacing: Style.space(6)
 
                     Text {
-                      text: modelData.platform_icon || "\uf7ab"
-                      font.family: modelData.platform_icon ? Style.font.family : "Font Awesome 7 Free Solid"
-                      font.styleName: modelData.platform_icon ? "" : "Solid"
+                      text: jobPlatformIcon || "\uf7ab"
+                      font.family: jobPlatformIcon ? Style.font.family : "Font Awesome 7 Free Solid"
+                      font.styleName: jobPlatformIcon ? "" : "Solid"
                       font.pixelSize: Style.font.subtitle
-                      color: modelData.platform_color || Color.accent
+                      color: jobPlatformColor || Color.accent
                     }
 
                     Text {
                       Layout.fillWidth: true
-                      text: jobTitle || modelData.title || modelData.url
+                      text: jobTitle
                       elide: Text.ElideRight
                       font.family: Style.font.family
                       font.pixelSize: Style.font.body
                       font.bold: true
                       color: Color.foreground
+                    }
+
+                    // Completed badge
+                    Rectangle {
+                      visible: jobStatus === "completed"
+                      implicitWidth: compTxt.implicitWidth + Style.space(8)
+                      implicitHeight: Style.space(18)
+                      radius: Style.cornerRadius
+                      color: Qt.rgba(0.3, 0.8, 0.4, 0.2)
+                      border.color: "#4EBF71"
+                      border.width: 1
+                      Text {
+                        id: compTxt
+                        anchors.centerIn: parent
+                        text: "DONE"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        color: "#4EBF71"
+                      }
                     }
 
                     // Queued badge
@@ -877,7 +917,7 @@ Panel {
                       Text {
                         id: fmtTxt
                         anchors.centerIn: parent
-                        text: (modelData.format || "video").toUpperCase()
+                        text: (jobFormat || "video").toUpperCase()
                         font.family: Style.font.family
                         font.pixelSize: Style.font.caption
                         color: Color.foreground
@@ -885,25 +925,26 @@ Panel {
                     }
 
                     Button {
+                      visible: jobStatus !== "completed"
                       iconText: "󰅖"
                       tooltipText: "Cancel Download"
-                      onClicked: root.cancelJob(modelData.id)
+                      onClicked: root.cancelJob(jobId)
                     }
                   }
 
                   // Galloping Pony tracking download progress
                   Item {
                     width: parent.width
-                    height: Style.space(26)
-                    visible: jobStatus === "downloading" || jobStatus === "processing"
+                    height: Style.space(28)
+                    visible: jobStatus === "downloading" || jobStatus === "processing" || jobStatus === "completed"
 
                     Item {
-                      width: Style.space(34)
-                      height: Style.space(25)
-                      x: Math.max(0, Math.min(parent.width - width, (parent.width - width) * (jobProgress / 100.0)))
+                      width: Style.space(38)
+                      height: Style.space(28)
+                      x: Math.max(0, Math.min(parent.width - width, (parent.width - width) * (Math.max(0, Math.min(100, jobProgress)) / 100.0)))
 
                       Behavior on x {
-                        NumberAnimation { duration: 120; easing.type: Easing.OutQuad }
+                        NumberAnimation { duration: 100; easing.type: Easing.Linear }
                       }
 
                       AnimatedSprite {
@@ -914,7 +955,7 @@ Panel {
                         frameCount: 7
                         frameX: 0
                         frameY: 0
-                        frameRate: 12
+                        frameRate: 14
                         interpolate: false
                         running: root.opened && (jobStatus === "downloading" || jobStatus === "processing")
                         loops: AnimatedSprite.Infinite
@@ -931,12 +972,12 @@ Panel {
 
                     Rectangle {
                       height: parent.height
-                      width: jobStatus === "queued" ? 0 : Math.max(0, Math.min(parent.width, parent.width * (jobProgress / 100.0)))
+                      width: jobStatus === "queued" ? 0 : Math.max(0, Math.min(parent.width, parent.width * (Math.max(0, Math.min(100, jobProgress)) / 100.0)))
                       radius: Style.space(3)
-                      color: Color.accent
+                      color: jobStatus === "completed" ? "#4EBF71" : Color.accent
 
                       Behavior on width {
-                        NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
+                        NumberAnimation { duration: 100; easing.type: Easing.Linear }
                       }
                     }
                   }
@@ -949,16 +990,18 @@ Panel {
                       Layout.fillWidth: true
                       text: jobStatus === "queued"
                         ? "󰄱 Queued (waiting for worker slot)..."
-                        : (jobStatus === "transcribing"
-                          ? "󰍬 Transcribing offline with Whisper..."
-                          : (jobStatus === "processing"
-                            ? ("󰑋 Processing media (" + jobProgress.toFixed(1) + "%)" + (jobSpeed !== "--" ? (" • " + jobSpeed) : ""))
-                            : ((jobProgress > 0 ? (jobProgress.toFixed(1) + "%") : "0%") +
-                               (jobSpeed && jobSpeed !== "--" ? (" • " + jobSpeed) : "") +
-                               (jobEta && jobEta !== "--" ? (" • ETA " + jobEta) : ""))))
+                        : (jobStatus === "completed"
+                          ? "✓ Download Complete (100%)"
+                          : (jobStatus === "transcribing"
+                            ? "󰍬 Transcribing offline with Whisper..."
+                            : (jobStatus === "processing"
+                              ? ("󰑋 Processing media (" + jobProgress.toFixed(1) + "%)" + (jobSpeed !== "--" ? (" • " + jobSpeed) : ""))
+                              : ((jobProgress > 0 ? (jobProgress.toFixed(1) + "%") : "0%") +
+                                 (jobSpeed && jobSpeed !== "--" ? (" • " + jobSpeed) : "") +
+                                 (jobEta && jobEta !== "--" ? (" • ETA " + jobEta) : "")))))
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
-                      color: jobStatus === "queued" ? Color.accent : Qt.darker(Color.foreground, 1.3)
+                      color: jobStatus === "completed" ? "#4EBF71" : (jobStatus === "queued" ? Color.accent : Qt.darker(Color.foreground, 1.3))
                     }
                   }
                 }
