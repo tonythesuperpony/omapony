@@ -18,6 +18,7 @@ import urllib.request
 import subprocess
 import argparse
 import math
+import signal
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -156,14 +157,15 @@ def load_state():
         return empty
 
 
-def save_state(st):
+def save_state(st, sync=True):
     try:
         content = json.dumps(st, indent=2)
         tmp = STATE_FILE.with_suffix(".tmp")
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
-            os.fsync(f.fileno())
+            if sync:
+                os.fsync(f.fileno())
         tmp.replace(STATE_FILE)
     except Exception as e:
         print(f"Error saving state: {e}", file=sys.stderr)
@@ -360,6 +362,68 @@ def is_playlist_url(url):
     return "list=" in u or "/playlist" in u or "/sets/" in u
 
 
+def parse_media_url(url):
+    """
+    Parses a media URL to distinguish between:
+    - single video URL
+    - video URL with attached playlist/mix (e.g. ?v=...&list=... or youtu.be/...?...list=...)
+    - pure playlist URL without single video ID (e.g. /playlist?list=...)
+    Returns dict:
+      is_playlist: bool
+      has_single_video: bool
+      single_url: str (clean URL without playlist query params, preserving ?t= timestamp)
+      is_pure_playlist: bool
+    """
+    if not url:
+        return {"is_playlist": False, "has_single_video": False, "single_url": "", "is_pure_playlist": False}
+
+    u = url.strip()
+    parsed = urllib.parse.urlparse(u)
+    qs = urllib.parse.parse_qs(parsed.query)
+    netloc = parsed.netloc.lower()
+    path = parsed.path.lower()
+
+    has_list_param = "list" in qs
+    is_pl_path = "/playlist" in path or "/sets/" in path
+    is_playlist = has_list_param or is_pl_path
+
+    has_single_video = False
+    single_url = u
+
+    if "youtu.be" in netloc:
+        vid_id = parsed.path.strip("/")
+        if vid_id:
+            has_single_video = True
+            clean_qs = {}
+            if "t" in qs:
+                clean_qs["t"] = qs["t"][0]
+            q_str = f"?{urllib.parse.urlencode(clean_qs)}" if clean_qs else ""
+            single_url = f"https://youtu.be/{vid_id}{q_str}"
+    elif "youtube.com" in netloc:
+        if "v" in qs and qs["v"]:
+            has_single_video = True
+            vid_id = qs["v"][0]
+            clean_qs = {"v": vid_id}
+            if "t" in qs:
+                clean_qs["t"] = qs["t"][0]
+            single_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", urllib.parse.urlencode(clean_qs), ""))
+        elif "/shorts/" in path:
+            has_single_video = True
+            single_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", "", ""))
+    elif is_playlist and not is_pl_path:
+        clean_qs = {k: v for k, v in qs.items() if k not in ("list", "index")}
+        if clean_qs:
+            has_single_video = True
+            single_url = urllib.parse.urlunparse((parsed.scheme, parsed.netloc, parsed.path, "", urllib.parse.urlencode(clean_qs, doseq=True), ""))
+
+    return {
+        "is_playlist": is_playlist,
+        "has_single_video": has_single_video,
+        "single_url": single_url,
+        "is_pure_playlist": is_playlist and not has_single_video
+    }
+
+
 def extract_playlist_entries(url, max_entries=100):
     """
     Extracts entries from a playlist URL using yt-dlp flat-playlist.
@@ -404,10 +468,10 @@ def extract_playlist_entries(url, max_entries=100):
     return None, []
 
 
-def add_job(url, fmt, transcribe, subtitles, model, title=None):
+def create_job_dict(url, fmt, transcribe, subtitles, model, title=None):
     meta = detect_platform(url)
     job_id = f"dl_{int(time.time())}_{os.urandom(3).hex()}"
-    job = {
+    return {
         "id": job_id,
         "url": url,
         "platform": meta["name"],
@@ -433,12 +497,36 @@ def add_job(url, fmt, transcribe, subtitles, model, title=None):
         "created_at": int(time.time())
     }
 
+
+def add_job(url, fmt, transcribe, subtitles, model, title=None):
+    job = create_job_dict(url, fmt, transcribe, subtitles, model, title)
     with state_lock():
         state = load_state()
         state.setdefault("active", []).append(job)
         save_state(state)
+    return job["id"]
 
-    return job_id
+
+def add_jobs(items):
+    """Batch-append multiple jobs under a single advisory lock and atomic disk write"""
+    if not items:
+        return []
+    new_jobs = [
+        create_job_dict(
+            it["url"],
+            it["fmt"],
+            it.get("transcribe", False),
+            it.get("subtitles", True),
+            it.get("model", "base"),
+            title=it.get("title")
+        )
+        for it in items
+    ]
+    with state_lock():
+        state = load_state()
+        state.setdefault("active", []).extend(new_jobs)
+        save_state(state)
+    return [j["id"] for j in new_jobs]
 
 
 def process_queue():
@@ -515,7 +603,7 @@ def spawn_transcribe_worker(job_id, media_file, model, subtitles, title):
     )
 
 
-def update_job_state(job_id, updates, state=None):
+def update_job_state(job_id, updates, state=None, sync=True):
     if state is None:
         state = load_state()
     updated = False
@@ -525,7 +613,7 @@ def update_job_state(job_id, updates, state=None):
             updated = True
             break
     if updated:
-        save_state(state)
+        save_state(state, sync=sync)
 
 
 def download_whisper_model(model_name="base"):
@@ -589,6 +677,7 @@ def run_offline_whisper(media_file, model_name="base", generate_subtitles=True):
                 engine,
                 "-m", model_path,
                 "-f", str(wav_path),
+                "-l", "auto",
                 "-otxt",
                 "-of", base_output
             ]
@@ -627,6 +716,8 @@ def cmd_detect(args):
     """Detect platform for given URL and output JSON"""
     url = args.url
     meta = detect_platform(url)
+    info = parse_media_url(url)
+    meta.update(info)
     print(json.dumps(meta))
 
 
@@ -639,15 +730,19 @@ def cmd_grab(args):
 
     cfg = load_config()
     meta = detect_platform(url)
+    info = parse_media_url(url)
 
     fmt = args.format or cfg.get("default_format", "video")
     transcribe = args.transcribe if args.transcribe is not None else cfg.get("auto_transcribe", False)
     subtitles = args.subtitles if args.subtitles is not None else cfg.get("make_subtitles", True)
     model = args.model or cfg.get("whisper_model", "base")
 
-    allow_playlist = args.playlist if args.playlist is not None else True
-    if args.no_playlist:
-        allow_playlist = False
+    allow_playlist = False
+    if args.playlist:
+        allow_playlist = True
+    elif not args.no_playlist:
+        if info["is_pure_playlist"]:
+            allow_playlist = True
 
     if allow_playlist and (args.playlist or is_playlist_url(url)):
         notify(
@@ -662,25 +757,32 @@ def cmd_grab(args):
                 f"Queued {len(entries)} items from:\n{pl_title}",
                 icon="media-playlist-repeat"
             )
-            job_ids = []
-            for entry in entries:
-                jid = add_job(entry["url"], fmt, transcribe, subtitles, model, title=entry.get("title"))
-                job_ids.append(jid)
+            batch = [{
+                "url": entry["url"],
+                "fmt": fmt,
+                "transcribe": transcribe,
+                "subtitles": subtitles,
+                "model": model,
+                "title": entry.get("title")
+            } for entry in entries]
+            job_ids = add_jobs(batch)
             push_ipc({"type": "reload"})
             process_queue()
             print(json.dumps({"status": "queued", "count": len(job_ids), "playlist": pl_title, "job_ids": job_ids}))
             return
 
+    target_url = info["single_url"] if (info["has_single_video"] and not allow_playlist) else url
+    sub_notice = " (single video)" if (info["is_playlist"] and not allow_playlist) else ""
     notify(
         f"OmaPony • {meta['name']}",
-        f"Captured {fmt.upper()} link from {source}.\nStarting download...",
+        f"Captured {fmt.upper()} link from {source}.{sub_notice}\nStarting download...",
         icon="video-x-generic"
     )
 
-    job_id = add_job(url, fmt, transcribe, subtitles, model)
+    job_id = add_job(target_url, fmt, transcribe, subtitles, model)
     push_ipc({"type": "reload"})
     process_queue()
-    print(json.dumps({"status": "queued", "job_id": job_id, "url": url, "platform": meta["name"]}))
+    print(json.dumps({"status": "queued", "job_id": job_id, "url": target_url, "platform": meta["name"]}))
 
 
 def cmd_add(args):
@@ -696,9 +798,13 @@ def cmd_add(args):
     subtitles = args.subtitles if args.subtitles is not None else cfg.get("make_subtitles", True)
     model = args.model or cfg.get("whisper_model", "base")
 
-    allow_playlist = args.playlist if args.playlist is not None else True
-    if args.no_playlist:
-        allow_playlist = False
+    info = parse_media_url(url)
+    allow_playlist = False
+    if args.playlist:
+        allow_playlist = True
+    elif not args.no_playlist:
+        if info["is_pure_playlist"]:
+            allow_playlist = True
 
     if allow_playlist and (args.playlist or is_playlist_url(url)):
         notify("OmaPony • Playlist", "Inspecting playlist entries...", icon="media-playlist-repeat")
@@ -709,19 +815,25 @@ def cmd_add(args):
                 f"Added {len(entries)} items from playlist:\n{pl_title}",
                 icon="media-playlist-repeat"
             )
-            job_ids = []
-            for entry in entries:
-                jid = add_job(entry["url"], fmt, transcribe, subtitles, model, title=entry.get("title"))
-                job_ids.append(jid)
+            batch = [{
+                "url": entry["url"],
+                "fmt": fmt,
+                "transcribe": transcribe,
+                "subtitles": subtitles,
+                "model": model,
+                "title": entry.get("title")
+            } for entry in entries]
+            job_ids = add_jobs(batch)
             push_ipc({"type": "reload"})
             process_queue()
             print(json.dumps({"status": "queued", "count": len(job_ids), "playlist": pl_title, "job_ids": job_ids}))
             return
 
-    job_id = add_job(url, fmt, transcribe, subtitles, model)
+    target_url = info["single_url"] if (info["has_single_video"] and not allow_playlist) else url
+    job_id = add_job(target_url, fmt, transcribe, subtitles, model)
     push_ipc({"type": "reload"})
     process_queue()
-    print(json.dumps({"status": "queued", "job_id": job_id}))
+    print(json.dumps({"status": "queued", "job_id": job_id, "url": target_url}))
 
 
 def cmd_worker(args):
@@ -754,6 +866,7 @@ def cmd_worker(args):
         "--progress",
         "--progress-template",
         "download:PROG:%(progress._percent_str)s|%(progress._speed_str)s|%(progress._eta_str)s|%(progress.downloaded_bytes)s|%(progress.total_bytes)s|%(progress.total_bytes_estimate)s|%(info.format_id)s|%(info.vcodec)s|%(info.acodec)s|%(info.title)s",
+        "--print", "after_video:FINAL:%(filepath)s",
         "--print", "after_move:FINAL:%(filepath)s",
         "-o", out_template
     ]
@@ -888,7 +1001,7 @@ def cmd_worker(args):
                     last_pct = max(last_pct, scaled_pct)
 
                     now = time.time()
-                    if now - last_disk_time >= 0.10 or scaled_pct >= 99.0:
+                    if now - last_disk_time >= 0.15 or scaled_pct >= 99.0:
                         last_disk_time = now
                         with state_lock():
                             update_job_state(job_id, {
@@ -898,7 +1011,7 @@ def cmd_worker(args):
                                 "downloaded_bytes": dl_b,
                                 "total_bytes": effective_total,
                                 "title": title or job.get("title", "")
-                            })
+                            }, sync=False)
                 except Exception:
                     pass
 
@@ -924,7 +1037,7 @@ def cmd_worker(args):
                         last_pct = scaled_pct
 
                         now = time.time()
-                        if now - last_disk_time >= 0.10 or scaled_pct >= 99.0:
+                        if now - last_disk_time >= 0.15 or scaled_pct >= 99.0:
                             last_disk_time = now
                             with state_lock():
                                 update_job_state(job_id, {
@@ -932,7 +1045,7 @@ def cmd_worker(args):
                                     "speed": spd,
                                     "eta": eta,
                                     "title": title or job.get("title", "")
-                                })
+                                }, sync=False)
                     except Exception:
                         pass
 
@@ -942,8 +1055,9 @@ def cmd_worker(args):
             err_line = next((l for l in reversed(recent_lines) if "error" in l.lower()), None) or (recent_lines[-1] if recent_lines else "unknown error")
             err = f"yt-dlp error (code {proc.returncode}): {err_line}"
             with state_lock():
-                update_job_state(job_id, {"status": "error", "error_message": err})
+                update_job_state(job_id, {"status": "error", "error_message": err}, sync=True)
             notify("OmaPony", f"Failed to download {title or job['url']}: {err_line}", urgency="critical", icon="dialog-error")
+            push_ipc({"type": "reload"})
             process_queue()
             return
 
@@ -1069,22 +1183,30 @@ def cmd_transcribe(args):
 
     push_ipc({"type": "reload"})
 
-    if srt_res:
-        notify(
-            "✓ Subtitles Ready • Whisper AI",
-            f"Generated subtitles for {title}",
-            icon="audio-x-generic"
-        )
+    if srt_res or txt_res:
+        if srt_res:
+            notify(
+                "✓ Subtitles Ready • Whisper AI",
+                f"Generated subtitles for {title}",
+                icon="audio-x-generic"
+            )
+        else:
+            notify(
+                "✓ Transcription Ready • Whisper AI",
+                f"Transcript generated for {title}",
+                icon="audio-x-generic"
+            )
     else:
         notify(
-            "✓ Transcription Ready • Whisper AI",
-            f"Transcript generated for {title}",
-            icon="audio-x-generic"
+            "Whisper AI • Transcription Failed",
+            f"Could not generate transcript for {title}",
+            urgency="normal",
+            icon="dialog-warning"
         )
 
 
 def cmd_cancel(args):
-    """Cancel an active download or queued job"""
+    """Cancel an active download or queued job and kill full child process group"""
     job_id = args.job_id
     with state_lock():
         state = load_state()
@@ -1094,10 +1216,19 @@ def cmd_cancel(args):
                 target = j
                 break
         if target and target.get("pid"):
+            pid = target["pid"]
             try:
-                os.kill(target["pid"], 9)
-            except Exception:
+                pgid = os.getpgid(pid)
+                os.killpg(pgid, signal.SIGTERM)
+                time.sleep(0.05)
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
                 pass
+            except Exception:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except Exception:
+                    pass
         state["active"] = [j for j in state.get("active", []) if j.get("id") != job_id]
         save_state(state)
 
@@ -1130,7 +1261,7 @@ def cmd_open_dir(args):
     default_dir = os.path.expanduser(cfg.get("download_dir") or "~/Videos/OmaPony")
     path = args.path or default_dir
     p = Path(os.path.expanduser(path))
-    if p.is_file():
+    if p.is_file() or (not p.exists() and p.suffix):
         p = p.parent
     p.mkdir(parents=True, exist_ok=True)
     subprocess.Popen(["xdg-open", str(p)], start_new_session=True)

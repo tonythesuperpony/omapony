@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.2] - 2026-09-13
+
+### 🐛 Fixed
+- **Process Group Termination on Cancel**: Updated `cmd_cancel` to terminate the entire process group using `os.killpg()`, ensuring child processes (`yt-dlp` and `ffmpeg`) are reliably killed rather than orphaned in the background.
+- **Bar Icon Spinner Reset**: Added `onRunningChanged` and `onHasActiveDownloadsChanged` handlers in `BarWidget.qml` to snap the icon rotation back to `0` when downloads finish, preventing the horse head icon from freezing upside down.
+- **Active Download Error Visibility**: Added an `ERROR` badge, urgent styling, and inline display of `error_message` on active download cards so failed downloads are clearly visible and dismissible.
+- **Whisper False-Positive Success Notification**: Fixed `cmd_transcribe` notification logic to verify that transcripts or subtitles were actually generated before announcing success, and notify properly on failure.
+- **Multi-Language Whisper Transcription**: Added `-l auto` to `whisper-cli` arguments to allow automatic spoken language detection rather than defaulting to English-only (`-l en`).
+- **Safe Directory Opening**: Fixed `cmd_open_dir` to check for file extensions on non-existent paths, preventing the accidental creation of directories named after deleted files.
+- **Audio Extraction Path Resolution**: Added `after_video` print hook to `yt-dlp` arguments so post-processed audio files (`.mp3`) are correctly tracked rather than lost or misattributed.
+
+### ⚡ Performance & Optimization
+- **Non-Blocking Progress State Writes**: Added an optional `sync` flag to `save_state()`, using asynchronous flushes without synchronous `os.fsync()` disk barriers during routine progress updates.
+- **Batch Playlist Queueing**: Added `add_jobs()` helper to enqueue playlist entries in a single advisory file lock and disk write cycle instead of up to 100 sequential write/fsync cycles.
+- **History Delegate Memoization**: Memoized `displayedHistory` in `BarWidget.qml` to prevent `Repeater` from needlessly re-instantiating all history delegate cards on every progress tick.
+- **Eliminated Redundant Polling Timer**: Replaced 100ms timer with reactive inotify and Unix socket events, idling the refresh timer when the panel is closed.
+
+### ⌨️ UX & Keyboard Navigation
+- **Playlist & Mix Detection with Single-Video Differentiation**: Added `parseMediaUrl` (in both JavaScript and Python) to accurately identify whether a URL is a pure playlist or a single video containing playlist context (e.g. `youtu.be/...?...list=...` or `watch?v=...&list=...`).
+- **Live Playlist Warning Banner**: Added a styled warning banner below the URL input alerting users when a link contains playlist parameters.
+- **Single Video vs. Playlist Choice**: Provided distinct primary and secondary action buttons (`Download Single Video` and `Download Entire Playlist`) when a video with playlist context is entered, cleanly stripping playlist parameters and passing `--no-playlist` to avoid accidental mass downloads.
+- **Playlist Download Confirmation Modal**: Integrated `ConfirmDialog` modal in `BarWidget.qml` to verify user intent before queuing an entire playlist.
+- **Accidental Queue Flood Prevention**: Updated `omapony add` and `omapony grab` CLI commands to default safely to downloading only the single video when video IDs are present, requiring explicit `--playlist` to fan out.
+- **Escape Key Dismissal**: Added `Keys.onEscapePressed` to `urlInput` in `BarWidget.qml` so the popup panel can be dismissed with `Escape` even while the text field has active focus.
+
+---
+
 ## [1.1.1] - 2026-09-13
 
 ### ⚡ Performance & Optimization

@@ -54,6 +54,8 @@ Panel {
   readonly property color accentAlpha30: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.30)
   readonly property color accentAlpha40: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.40)
 
+  property var displayedHistory: []
+
   ListModel {
     id: activeJobsModel
   }
@@ -80,6 +82,7 @@ Panel {
       var fmt = String(job.format || "video")
       var p_icon = String(job.platform_icon || "")
       var p_col = String(job.platform_color || "")
+      var err_msg = String(job.error_message || "")
 
       if (existingMap[jid] !== undefined) {
         var idx = existingMap[jid]
@@ -91,6 +94,7 @@ Panel {
         activeJobsModel.setProperty(idx, "jobFormat", fmt)
         activeJobsModel.setProperty(idx, "jobPlatformIcon", p_icon)
         activeJobsModel.setProperty(idx, "jobPlatformColor", p_col)
+        activeJobsModel.setProperty(idx, "jobErrorMessage", err_msg)
       } else {
         activeJobsModel.append({
           "jobId": jid,
@@ -101,7 +105,8 @@ Panel {
           "jobStatus": st,
           "jobFormat": fmt,
           "jobPlatformIcon": p_icon,
-          "jobPlatformColor": p_col
+          "jobPlatformColor": p_col,
+          "jobErrorMessage": err_msg
         })
       }
     }
@@ -122,14 +127,14 @@ Panel {
 
   // Live platform detection for typed/pasted URL
   property var detectedPlatform: detectPlatform(urlInput.text)
+  property var mediaUrlInfo: parseMediaUrl(urlInput.text)
+  property bool showPlaylistConfirm: false
 
-  // Fast and smooth refresh timer:
-  // When panel is opened: ticks every 100ms for ultra-responsive 10 FPS progress bar & pony gallop
-  // When closed with active downloads: ticks every 500ms to keep bar icon spinner rotating
-  // When idle & closed: stopped (0% CPU)
+  // Fallback refresh timer when panel is open.
+  // Active progress updates are pushed reactively via FileView inotify and Unix socket IPC.
   Timer {
-    interval: root.opened ? 100 : (root.hasActiveDownloads ? 500 : 2000)
-    running: root.opened || root.hasActiveDownloads
+    interval: 500
+    running: root.opened
     repeat: true
     onTriggered: stateFile.reload()
   }
@@ -176,12 +181,72 @@ Panel {
         var parsed = JSON.parse(raw)
         root.stateData = parsed
         root.syncActiveModel(parsed.active || [])
+        var hist = parsed.history || []
+        var histSlice = hist.slice(0, 6)
+        var cur = root.displayedHistory
+        var changed = false
+        if (cur.length !== histSlice.length) {
+          changed = true
+        } else {
+          for (var i = 0; i < histSlice.length; i++) {
+            if (!cur[i] || cur[i].id !== histSlice[i].id || cur[i].transcribing !== histSlice[i].transcribing || cur[i].completed_at !== histSlice[i].completed_at) {
+              changed = true
+              break
+            }
+          }
+        }
+        if (changed) {
+          root.displayedHistory = histSlice
+        }
       }
     } catch (e) {
       console.warn("omapony: failed to parse state JSON", e)
     }
   }
 
+
+  function parseMediaUrl(url) {
+    if (!url) return null
+    var trimmed = String(url).trim()
+    if (!trimmed || trimmed.indexOf("http") !== 0) return null
+
+    var isPlaylist = false
+    var hasSingleVideo = false
+    var singleUrl = trimmed
+    var lower = trimmed.toLowerCase()
+
+    var hasListParam = /[?&]list=/i.test(trimmed)
+    var isPlPath = lower.indexOf("/playlist") !== -1 || lower.indexOf("/sets/") !== -1
+    isPlaylist = hasListParam || isPlPath
+
+    var mShort = trimmed.match(/https?:\/\/youtu\.be\/([a-zA-Z0-9_-]+)/i)
+    var mWatch = trimmed.match(/https?:\/\/(?:www\.|m\.|music\.)?youtube\.com\/watch\?[^#\s]*/i)
+    var mShorts = trimmed.match(/https?:\/\/(?:www\.|m\.|music\.)?youtube\.com\/shorts\/([a-zA-Z0-9_-]+)/i)
+
+    if (mShort && mShort[1]) {
+      hasSingleVideo = true
+      var tMatch = trimmed.match(/[?&]t=([0-9a-zA-Z]+)/i)
+      singleUrl = "https://youtu.be/" + mShort[1] + (tMatch ? "?t=" + tMatch[1] : "")
+    } else if (mWatch) {
+      var vMatch = trimmed.match(/[?&]v=([a-zA-Z0-9_-]+)/i)
+      if (vMatch && vMatch[1]) {
+        hasSingleVideo = true
+        var tMatch = trimmed.match(/[?&]t=([0-9a-zA-Z]+)/i)
+        var base = trimmed.split("?")[0]
+        singleUrl = base + "?v=" + vMatch[1] + (tMatch ? "&t=" + tMatch[1] : "")
+      }
+    } else if (mShorts && mShorts[1]) {
+      hasSingleVideo = true
+      singleUrl = trimmed.split("?")[0]
+    }
+
+    return {
+      isPlaylist: isPlaylist,
+      hasSingleVideo: hasSingleVideo,
+      singleUrl: singleUrl,
+      isPurePlaylist: isPlaylist && !hasSingleVideo
+    }
+  }
 
   function detectPlatform(url) {
     if (!url) return null
@@ -219,11 +284,36 @@ Panel {
     return null
   }
 
-  function startDownload() {
-    var url = urlInput.text.trim()
-    if (!url) return
+  function startDownload(mode) {
+    var rawUrl = urlInput.text.trim()
+    if (!rawUrl) return
 
-    var cmd = ["omapony", "add", url, "--format", root.selectedFormat]
+    var info = root.mediaUrlInfo || parseMediaUrl(rawUrl)
+    var targetUrl = rawUrl
+    var forceFlag = ""
+
+    if (info && info.isPlaylist) {
+      if (!mode) {
+        if (info.hasSingleVideo) {
+          targetUrl = info.singleUrl || rawUrl
+          forceFlag = "--no-playlist"
+        } else {
+          root.showPlaylistConfirm = true
+          return
+        }
+      } else if (mode === "single") {
+        targetUrl = info.singleUrl || rawUrl
+        forceFlag = "--no-playlist"
+      } else if (mode === "playlist") {
+        targetUrl = rawUrl
+        forceFlag = "--playlist"
+      }
+    }
+
+    var cmd = ["omapony", "add", targetUrl, "--format", root.selectedFormat]
+    if (forceFlag !== "") {
+      cmd.push(forceFlag)
+    }
     if (root.transcribeEnabled) {
       cmd.push("--transcribe")
       if (root.subtitlesEnabled) cmd.push("--subtitles")
@@ -232,7 +322,12 @@ Panel {
     Quickshell.execDetached(cmd)
 
     urlInput.text = ""
+    root.showPlaylistConfirm = false
     stateFile.reload()
+  }
+
+  function confirmPlaylistDownload() {
+    root.showPlaylistConfirm = true
   }
 
   function quickGrab() {
@@ -283,6 +378,7 @@ Panel {
   Component {
     id: horseHeadIconComponent
     Text {
+      id: horseText
       anchors.centerIn: parent
       anchors.horizontalCenterOffset: root.hasActiveDownloads ? 0 : 3.17
       anchors.verticalCenterOffset: root.hasActiveDownloads ? 0 : 3.1
@@ -293,6 +389,16 @@ Panel {
       color: button.active && button.useActiveColor ? button.activeColor : button.foreground
       renderType: Text.NativeRendering
       rotation: 0
+
+      Connections {
+        target: root
+        function onHasActiveDownloadsChanged() {
+          if (!root.hasActiveDownloads) {
+            horseText.rotation = 0
+          }
+        }
+      }
+
       RotationAnimation on rotation {
         running: root.hasActiveDownloads
         from: 0
@@ -300,6 +406,11 @@ Panel {
         duration: 1200
         loops: Animation.Infinite
         direction: RotationAnimation.Clockwise
+        onRunningChanged: {
+          if (!running) {
+            horseText.rotation = 0
+          }
+        }
       }
     }
   }
@@ -510,7 +621,26 @@ Panel {
                 id: urlInput
                 Layout.fillWidth: true
                 placeholderText: "Paste YouTube, X, Instagram, Facebook link..."
-                onAccepted: root.startDownload()
+                onAccepted: {
+                  if (root.mediaUrlInfo && root.mediaUrlInfo.isPlaylist) {
+                    if (root.mediaUrlInfo.hasSingleVideo) {
+                      root.startDownload("single")
+                    } else {
+                      root.confirmPlaylistDownload()
+                    }
+                  } else {
+                    root.startDownload()
+                  }
+                }
+                Keys.onEscapePressed: function(event) {
+                  if (root.showPlaylistConfirm) {
+                    root.showPlaylistConfirm = false
+                    event.accepted = true
+                  } else {
+                    root.close()
+                    event.accepted = true
+                  }
+                }
               }
 
               Button {
@@ -537,7 +667,7 @@ Panel {
                 implicitHeight: Style.space(22)
                 radius: Style.cornerRadius
                 color: root.accentAlpha15
-                border.color: root.detectedPlatform.color
+                border.color: root.detectedPlatform ? root.detectedPlatform.color : Color.accent
                 border.width: 1
 
                 Row {
@@ -546,19 +676,67 @@ Panel {
                   spacing: Style.space(5)
 
                   Text {
-                    text: root.detectedPlatform.icon
+                    text: root.detectedPlatform ? root.detectedPlatform.icon : ""
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
-                    color: root.detectedPlatform.color
+                    color: root.detectedPlatform ? root.detectedPlatform.color : Color.accent
                   }
 
                   Text {
-                    text: root.detectedPlatform.name + " Detected"
+                    text: (root.detectedPlatform ? root.detectedPlatform.name : "") + " Detected"
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
                     font.bold: true
                     color: Color.foreground
                   }
+                }
+              }
+            }
+
+            // Playlist / Mix Warning Banner
+            Rectangle {
+              visible: root.mediaUrlInfo && root.mediaUrlInfo.isPlaylist
+              width: parent.width
+              implicitHeight: visible ? (plNoticeCol.implicitHeight + Style.space(16)) : 0
+              radius: Style.cornerRadius
+              color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.09)
+              border.color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.4)
+              border.width: 1
+
+              Column {
+                id: plNoticeCol
+                anchors.fill: parent
+                anchors.margins: Style.space(8)
+                spacing: Style.space(4)
+
+                Row {
+                  spacing: Style.space(6)
+                  Text {
+                    text: "󰑋"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.body
+                    color: Color.urgent
+                  }
+                  Text {
+                    text: (root.mediaUrlInfo && root.mediaUrlInfo.hasSingleVideo)
+                      ? "Playlist / Mix Link Detected"
+                      : "Full Playlist Link Detected"
+                    font.family: Style.font.family
+                    font.pixelSize: Style.font.caption
+                    font.bold: true
+                    color: Color.urgent
+                  }
+                }
+
+                Text {
+                  width: parent.width
+                  wrapMode: Text.Wrap
+                  text: (root.mediaUrlInfo && root.mediaUrlInfo.hasSingleVideo)
+                    ? "This link points to a single video with an attached playlist/mix. You can download just this track or the entire playlist below."
+                    : "This link contains an entire playlist. Downloading will queue all individual tracks from the playlist."
+                  font.family: Style.font.family
+                  font.pixelSize: Style.font.caption
+                  color: Qt.darker(Color.foreground, 1.25)
                 }
               }
             }
@@ -810,8 +988,51 @@ Panel {
           }
 
           // ------------------------------------------------------------- Download Action Button
+          // Video in Playlist / Mix options: prominent choice between single video or playlist
+          RowLayout {
+            width: parent.width
+            visible: root.mediaUrlInfo && root.mediaUrlInfo.isPlaylist && root.mediaUrlInfo.hasSingleVideo
+            spacing: Style.space(8)
+
+            Button {
+              Layout.fillWidth: true
+              text: "Download Single Video"
+              iconText: "󰕧"
+              fontSize: Style.font.caption
+              selected: true
+              accent: Color.accent
+              tooltipText: "Download only this single video (strips playlist parameters)"
+              onClicked: root.startDownload("single")
+            }
+
+            Button {
+              Layout.fillWidth: true
+              text: "Download Entire Playlist"
+              iconText: "󰑋"
+              fontSize: Style.font.caption
+              selected: false
+              tooltipText: "Confirm and queue all items from this playlist"
+              onClicked: root.confirmPlaylistDownload()
+            }
+          }
+
+          // Pure Playlist option
           Button {
             width: parent.width
+            visible: root.mediaUrlInfo && root.mediaUrlInfo.isPurePlaylist
+            text: "Download Entire Playlist"
+            iconText: "󰑋"
+            fontSize: Style.font.subtitle
+            selected: true
+            accent: Color.accent
+            tooltipText: "Confirm and queue all items from this playlist"
+            onClicked: root.confirmPlaylistDownload()
+          }
+
+          // Standard Single Video / Audio Download
+          Button {
+            width: parent.width
+            visible: !root.mediaUrlInfo || !root.mediaUrlInfo.isPlaylist
             text: "Start Download"
             iconText: "󰇚"
             fontSize: Style.font.subtitle
@@ -848,12 +1069,13 @@ Panel {
                 required property string jobFormat
                 required property string jobPlatformIcon
                 required property string jobPlatformColor
+                required property string jobErrorMessage
 
                 width: mainColumn.width
                 implicitHeight: activeCol.implicitHeight + Style.space(16)
                 radius: Style.cornerRadius
                 color: Style.selectedFillFor(Color.foreground, Color.accent)
-                border.color: jobStatus === "completed" ? Qt.rgba(0.3, 0.8, 0.4, 0.5) : root.accentAlpha30
+                border.color: jobStatus === "completed" ? Qt.rgba(0.3, 0.8, 0.4, 0.5) : (jobStatus === "error" ? Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.5) : root.accentAlpha30)
                 border.width: 1
 
                 Column {
@@ -882,6 +1104,26 @@ Panel {
                       font.pixelSize: Style.font.body
                       font.bold: true
                       color: Color.foreground
+                    }
+
+                    // Error badge
+                    Rectangle {
+                      visible: jobStatus === "error"
+                      implicitWidth: errTxt.implicitWidth + Style.space(8)
+                      implicitHeight: Style.space(18)
+                      radius: Style.cornerRadius
+                      color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.15)
+                      border.color: Color.urgent
+                      border.width: 1
+                      Text {
+                        id: errTxt
+                        anchors.centerIn: parent
+                        text: "ERROR"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        color: Color.urgent
+                      }
                     }
 
                     // Completed badge
@@ -943,7 +1185,7 @@ Panel {
                     Button {
                       visible: jobStatus !== "completed"
                       iconText: "󰅖"
-                      tooltipText: "Cancel Download"
+                      tooltipText: jobStatus === "error" ? "Dismiss Error" : "Cancel Download"
                       onClicked: root.cancelJob(jobId)
                     }
                   }
@@ -990,7 +1232,7 @@ Panel {
                       height: parent.height
                       width: jobStatus === "queued" ? 0 : Math.max(0, Math.min(parent.width, parent.width * (Math.max(0, Math.min(100, jobProgress)) / 100.0)))
                       radius: Style.space(3)
-                      color: jobStatus === "completed" ? "#4EBF71" : Color.accent
+                      color: jobStatus === "completed" ? "#4EBF71" : (jobStatus === "error" ? Color.urgent : Color.accent)
 
                       Behavior on width {
                         NumberAnimation { duration: 100; easing.type: Easing.Linear }
@@ -1008,16 +1250,18 @@ Panel {
                         ? "󰄱 Queued (waiting for worker slot)..."
                         : (jobStatus === "completed"
                           ? "✓ Download Complete (100%)"
-                          : (jobStatus === "transcribing"
-                            ? "󰍬 Transcribing offline with Whisper..."
-                            : (jobStatus === "processing"
-                              ? ("󰑋 Processing media (" + jobProgress.toFixed(1) + "%)" + (jobSpeed !== "--" ? (" • " + jobSpeed) : ""))
-                              : ((jobProgress > 0 ? (jobProgress.toFixed(1) + "%") : "0%") +
-                                 (jobSpeed && jobSpeed !== "--" ? (" • " + jobSpeed) : "") +
-                                 (jobEta && jobEta !== "--" ? (" • ETA " + jobEta) : "")))))
+                          : (jobStatus === "error"
+                            ? ("󰅖 " + (jobErrorMessage || "Download failed"))
+                            : (jobStatus === "transcribing"
+                              ? "󰍬 Transcribing offline with Whisper..."
+                              : (jobStatus === "processing"
+                                ? ("󰑋 Processing media (" + jobProgress.toFixed(1) + "%)" + (jobSpeed !== "--" ? (" • " + jobSpeed) : ""))
+                                : ((jobProgress > 0 ? (jobProgress.toFixed(1) + "%") : "0%") +
+                                   (jobSpeed && jobSpeed !== "--" ? (" • " + jobSpeed) : "") +
+                                   (jobEta && jobEta !== "--" ? (" • ETA " + jobEta) : ""))))))
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
-                      color: jobStatus === "completed" ? "#4EBF71" : (jobStatus === "queued" ? Color.accent : Qt.darker(Color.foreground, 1.3))
+                      color: jobStatus === "completed" ? "#4EBF71" : (jobStatus === "error" ? Color.urgent : (jobStatus === "queued" ? Color.accent : Qt.darker(Color.foreground, 1.3)))
                     }
                   }
                 }
@@ -1028,7 +1272,7 @@ Panel {
           // ------------------------------------------------------------- Recent Downloads (History)
           Column {
             width: parent.width
-            visible: root.historyJobs.length > 0
+            visible: root.displayedHistory.length > 0
             height: visible ? implicitHeight : 0
             spacing: Style.space(8)
 
@@ -1052,7 +1296,7 @@ Panel {
             }
 
             Repeater {
-              model: root.historyJobs.slice(0, 6)
+              model: root.displayedHistory
 
               delegate: Rectangle {
                 required property var modelData
@@ -1165,6 +1409,19 @@ Panel {
             }
           }
 
+        }
+      }
+
+      ConfirmDialog {
+        anchors.fill: parent
+        opened: root.showPlaylistConfirm
+        message: "This link points to an entire playlist and will queue all items. Are you sure you want to download the full playlist?"
+        cancelText: "Cancel"
+        confirmText: "Download All"
+        onCanceled: root.showPlaylistConfirm = false
+        onConfirmed: {
+          root.showPlaylistConfirm = false
+          root.startDownload("playlist")
         }
       }
     }
