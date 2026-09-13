@@ -21,14 +21,8 @@ Panel {
     function show(): void { root.open() }
     function hide(): void { root.close() }
     function toggle(): void { root.toggle() }
-    function reload(): void {
-      console.log("[omapony-debug] IPC reload invoked!")
-      stateFile.reload()
-    }
-    function progress(payload: string): void {
-      console.log("[omapony-debug] IPC progress invoked: " + payload)
-      root.handleIpcMessage(payload)
-    }
+    function reload(): void { stateFile.reload() }
+    function progress(payload: string): void { stateFile.reload() }
   }
 
   implicitWidth: button.implicitWidth
@@ -50,6 +44,15 @@ Panel {
   readonly property bool hasActiveDownloads: activeDownloadsCount > 0
   readonly property bool whisperAvailable: stateData && stateData.whisper_available === true
   readonly property string whisperEngine: stateData && stateData.whisper_engine ? stateData.whisper_engine : "none"
+
+  // Shared accent color variants — avoids 27 repeated Color.accent.r/g/b decompositions
+  readonly property color accentAlpha08: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08)
+  readonly property color accentAlpha15: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
+  readonly property color accentAlpha18: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+  readonly property color accentAlpha20: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.20)
+  readonly property color accentAlpha25: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.25)
+  readonly property color accentAlpha30: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.30)
+  readonly property color accentAlpha40: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.40)
 
   ListModel {
     id: activeJobsModel
@@ -120,15 +123,6 @@ Panel {
   // Live platform detection for typed/pasted URL
   property var detectedPlatform: detectPlatform(urlInput.text)
 
-  // Rotating animation icon when downloads are active
-  property int spinnerAngle: 0
-  Timer {
-    interval: 100
-    running: root.hasActiveDownloads
-    repeat: true
-    onTriggered: root.spinnerAngle = (root.spinnerAngle + 30) % 360
-  }
-
   // Fast and smooth refresh timer:
   // When panel is opened: ticks every 100ms for ultra-responsive 10 FPS progress bar & pony gallop
   // When closed with active downloads: ticks every 500ms to keep bar icon spinner rotating
@@ -143,7 +137,6 @@ Panel {
   onOpenedChanged: {
     if (root.opened) {
       Quickshell.execDetached(["omapony", "status"])
-      stateFile.reload()
       Qt.callLater(function() {
         if (root.opened) urlInput.forceActiveFocus()
       })
@@ -158,6 +151,23 @@ Panel {
     onLoaded: root.loadState(text())
     onLoadFailed: root.loadState("{}")
     onFileChanged: reload()
+  }
+
+  // Unix domain socket server — receives push_ipc() reload events from the Python backend
+  SocketServer {
+    path: root.socketPath
+    active: true
+
+    handler: Component {
+      Socket {
+        parser: SplitParser {
+          splitMarker: "\n"
+          onRead: function(data) {
+            if (data.trim() !== "") stateFile.reload()
+          }
+        }
+      }
+    }
   }
 
   function loadState(raw) {
@@ -282,7 +292,15 @@ Panel {
       font.pixelSize: root.hasActiveDownloads ? Style.bar.iconFont : 9.7
       color: button.active && button.useActiveColor ? button.activeColor : button.foreground
       renderType: Text.NativeRendering
-      rotation: root.hasActiveDownloads ? root.spinnerAngle : 0
+      rotation: 0
+      RotationAnimation on rotation {
+        running: root.hasActiveDownloads
+        from: 0
+        to: 360
+        duration: 1200
+        loops: Animation.Infinite
+        direction: RotationAnimation.Clockwise
+      }
     }
   }
 
@@ -430,10 +448,9 @@ Panel {
             width: parent.width
             visible: root.showHelpDrawer
             height: visible ? (helpCol.implicitHeight + Style.space(16)) : 0
-            implicitHeight: helpCol.implicitHeight + Style.space(16)
             radius: Style.cornerRadius
-            color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.08)
-            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.25)
+            color: root.accentAlpha08
+            border.color: root.accentAlpha25
             border.width: 1
 
             Column {
@@ -519,8 +536,8 @@ Panel {
                 implicitWidth: badgeRow.implicitWidth + Style.space(12)
                 implicitHeight: Style.space(22)
                 radius: Style.cornerRadius
-                color: root.detectedPlatform ? Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15) : "transparent"
-                border.color: root.detectedPlatform ? root.detectedPlatform.color : "transparent"
+                color: root.accentAlpha15
+                border.color: root.detectedPlatform.color
                 border.width: 1
 
                 Row {
@@ -529,14 +546,14 @@ Panel {
                   spacing: Style.space(5)
 
                   Text {
-                    text: root.detectedPlatform ? root.detectedPlatform.icon : ""
+                    text: root.detectedPlatform.icon
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
-                    color: root.detectedPlatform ? root.detectedPlatform.color : Color.foreground
+                    color: root.detectedPlatform.color
                   }
 
                   Text {
-                    text: root.detectedPlatform ? (root.detectedPlatform.name + " Detected") : ""
+                    text: root.detectedPlatform.name + " Detected"
                     font.family: Style.font.family
                     font.pixelSize: Style.font.caption
                     font.bold: true
@@ -573,12 +590,11 @@ Panel {
           Rectangle {
             id: whisperSection
             width: parent.width
-            visible: urlInput.text.trim() !== ""
+            visible: urlInput.text.length > 0
             height: visible ? (whisperCol.implicitHeight + Style.space(16)) : 0
-            implicitHeight: whisperCol.implicitHeight + Style.space(16)
             radius: Style.cornerRadius
             color: Style.selectedFillFor(Color.foreground, Color.accent)
-            border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.2)
+            border.color: root.accentAlpha20
             border.width: 1
 
             Column {
@@ -837,7 +853,7 @@ Panel {
                 implicitHeight: activeCol.implicitHeight + Style.space(16)
                 radius: Style.cornerRadius
                 color: Style.selectedFillFor(Color.foreground, Color.accent)
-                border.color: jobStatus === "completed" ? Qt.rgba(0.3, 0.8, 0.4, 0.5) : Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.3)
+                border.color: jobStatus === "completed" ? Qt.rgba(0.3, 0.8, 0.4, 0.5) : root.accentAlpha30
                 border.width: 1
 
                 Column {
@@ -894,7 +910,7 @@ Panel {
                       implicitWidth: queueTxt.implicitWidth + Style.space(8)
                       implicitHeight: Style.space(18)
                       radius: Style.cornerRadius
-                      color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
+                      color: root.accentAlpha15
                       border.color: Color.accent
                       border.width: 1
                       Text {
@@ -1088,8 +1104,8 @@ Panel {
                         implicitWidth: transcribingBadge.implicitWidth + Style.space(8)
                         implicitHeight: Style.space(16)
                         radius: Style.cornerRadius
-                        color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
-                        border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.4)
+                        color: root.accentAlpha18
+                        border.color: root.accentAlpha40
                         border.width: 1
 
                         Row {
@@ -1119,7 +1135,7 @@ Panel {
                         implicitWidth: subBadge.implicitWidth + Style.space(6)
                         implicitHeight: Style.space(16)
                         radius: Style.cornerRadius
-                        color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.2)
+                        color: root.accentAlpha20
 
                         Text {
                           id: subBadge

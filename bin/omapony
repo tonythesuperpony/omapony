@@ -17,6 +17,7 @@ import urllib.parse
 import urllib.request
 import subprocess
 import argparse
+import math
 from pathlib import Path
 from contextlib import contextmanager
 
@@ -31,12 +32,11 @@ MODELS_DIR = DATA_DIR / "models"
 DEFAULT_VIDEO_DIR = HOME / "Videos" / "OmaPony"
 DEFAULT_AUDIO_DIR = HOME / "Music" / "OmaPony"
 
-# Ensure essential directories exist
-CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-DATA_DIR.mkdir(parents=True, exist_ok=True)
-MODELS_DIR.mkdir(parents=True, exist_ok=True)
-DEFAULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
-DEFAULT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+def ensure_dirs():
+    """Ensure essential directories exist lazily when needed."""
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @contextmanager
@@ -44,7 +44,8 @@ def state_lock():
     """Advisory file lock to serialize state updates and queue scheduling across processes."""
     lock_fd = None
     try:
-        lock_fd = open(STATE_LOCK_FILE, "w")
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        lock_fd = open(STATE_LOCK_FILE, "a")
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         yield
     except Exception:
@@ -158,34 +159,49 @@ def load_state():
 def save_state(st):
     try:
         content = json.dumps(st, indent=2)
-        with open(STATE_FILE, "w", encoding="utf-8") as f:
+        tmp = STATE_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
             f.write(content)
             f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(STATE_FILE)
     except Exception as e:
         print(f"Error saving state: {e}", file=sys.stderr)
 
 
+_whisper_engine_cache = None
+
+
 def detect_whisper_engine():
+    global _whisper_engine_cache
+    if _whisper_engine_cache is not None:
+        return _whisper_engine_cache
     # Priority 1: whisper-cli / whisper-cpp (fastest C++ implementation)
     if shutil.which("whisper-cli"):
-        return "whisper-cli", True
+        _whisper_engine_cache = "whisper-cli", True
+        return _whisper_engine_cache
     if shutil.which("whisper.cpp"):
-        return "whisper.cpp", True
+        _whisper_engine_cache = "whisper.cpp", True
+        return _whisper_engine_cache
     # Priority 2: python-openai-whisper CLI
     if shutil.which("whisper"):
-        return "whisper", True
+        _whisper_engine_cache = "whisper", True
+        return _whisper_engine_cache
     # Priority 3: python module
     try:
         import faster_whisper
-        return "faster_whisper", True
+        _whisper_engine_cache = "faster_whisper", True
+        return _whisper_engine_cache
     except ImportError:
         pass
     try:
         import whisper
-        return "whisper-py", True
+        _whisper_engine_cache = "whisper-py", True
+        return _whisper_engine_cache
     except ImportError:
         pass
-    return "none", False
+    _whisper_engine_cache = "none", False
+    return _whisper_engine_cache
 
 
 def notify(title, message, urgency="normal", icon="video-x-generic"):
@@ -499,8 +515,9 @@ def spawn_transcribe_worker(job_id, media_file, model, subtitles, title):
     )
 
 
-def update_job_state(job_id, updates):
-    state = load_state()
+def update_job_state(job_id, updates, state=None):
+    if state is None:
+        state = load_state()
     updated = False
     for job in state.get("active", []):
         if job.get("id") == job_id:
@@ -839,7 +856,6 @@ def cmd_worker(args):
                     if raw_pct <= 0.0 and effective_total > 0 and dl_b > 0:
                         raw_pct = min(99.0, (dl_b / effective_total) * 100.0)
                     elif raw_pct <= 0.0 and dl_b > 0:
-                        import math
                         raw_pct = min(90.0, 5.0 + math.log10(max(1, dl_b / 10000)) * 22.0)
 
                     # Guard against DASH init fragment reporting 100% on <100KB
@@ -895,12 +911,12 @@ def cmd_worker(args):
                         spd = m.group(3)
                         eta = m.group(4)
                         if job["format"] == "video":
-                            if stream_count <= 1:
-                                scaled_pct = max(3.0, raw_pct * 0.85)
-                            elif stream_count == 2:
+                            if saw_video_stream:
+                                # Likely the audio stream after video was downloaded
                                 scaled_pct = 85.0 + (raw_pct * 0.13)
                             else:
-                                scaled_pct = 98.0 + (raw_pct * 0.01)
+                                # Video stream: 3% → 85%
+                                scaled_pct = max(3.0, raw_pct * 0.85)
                         else:
                             scaled_pct = max(3.0, raw_pct * 0.98)
 
@@ -1226,6 +1242,7 @@ def main():
     p_transcribe.add_argument("title", help="Media Title")
 
     args = parser.parse_args()
+    ensure_dirs()
 
     if not args.command or args.command in ("summon", "toggle"):
         cmd_toggle(args)

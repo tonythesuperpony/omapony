@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.1] - 2026-09-13
+
+### ⚡ Performance & Optimization
+- **Operational Unix Domain Socket Server**: Fully wired Quickshell `SocketServer` with `Component { Socket { parser: SplitParser ... } }` listening on `$XDG_RUNTIME_DIR/omapony.sock`, fulfilling real-time event-driven UI updates with zero polling lag.
+- **Whisper Detection Caching**: Added in-memory caching to `detect_whisper_engine()` to eliminate redundant `$PATH` directory searches (saving 30+ filesystem traversals per second during active downloads).
+- **GPU-Composited Spinner Animation**: Replaced 100ms JavaScript polling timer for the bar icon spinner with a native declarative `RotationAnimation` running on the render thread.
+- **Optimized Theme Palette Lookups**: Replaced 27 repeated `Color.accent.r/g/b` component decompositions with shared `readonly property color accentAlphaXX` bindings.
+- **Lazy Directory Creation**: Deferred directory initialization from module load time to runtime `ensure_dirs()`.
+- **Lightweight Visibility Checks**: Replaced regex string trim check on URL textfield with direct `.length > 0` check on input change.
+
+### 🐛 Fixed
+- **Atomic State Writes**: Rewrote `save_state()` to write to `.tmp`, invoke `os.fsync()`, and atomically replace `state.json`, eliminating JSON corruption race conditions with QML's file watcher.
+- **Undefined `handleIpcMessage` Error**: Fixed `IpcHandler`'s `progress` method to invoke `stateFile.reload()`, eliminating runtime `TypeError`.
+- **Undefined `stream_count` in Fallback Parser**: Replaced missing `stream_count` variable in the fallback `[download]` progress parser with `saw_video_stream`.
+- **Redundant State Reloads**: Removed duplicate `stateFile.reload()` in `onOpenedChanged` to prevent triple-fire reloads on panel expansion.
+- **Non-Destructive State Lock**: Switched lock file open mode in `state_lock()` from `"w"` to `"a"` to avoid truncating `.state.lock`.
+- **Cleaned Up Debug Output**: Removed left-over `[omapony-debug]` console logging statements.
+
+---
+
 ## [1.1.0] - 2026-09-13
 
 ### 🚀 Added
