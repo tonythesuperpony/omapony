@@ -97,8 +97,8 @@ def is_pid_running(pid):
 
 def load_config():
     defaults = {
-        "download_dir": str(DEFAULT_VIDEO_DIR),
-        "audio_dir": str(DEFAULT_AUDIO_DIR),
+        "download_dir": "~/Videos/OmaPony",
+        "audio_dir": "~/Music/OmaPony",
         "default_format": "video",  # "video" or "audio"
         "auto_transcribe": False,
         "make_subtitles": True,
@@ -723,7 +723,8 @@ def cmd_worker(args):
         return
 
     cfg = load_config()
-    out_dir = Path(cfg.get("audio_dir" if job["format"] == "audio" else "download_dir"))
+    raw_dir = cfg.get("audio_dir" if job["format"] == "audio" else "download_dir") or ("~/Music/OmaPony" if job["format"] == "audio" else "~/Videos/OmaPony")
+    out_dir = Path(os.path.expanduser(raw_dir))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     out_template = str(out_dir / "%(title)s [%(id)s].%(ext)s")
@@ -1109,8 +1110,10 @@ def cmd_open(args):
 
 def cmd_open_dir(args):
     """Open folder in file manager"""
-    path = args.path or str(DEFAULT_VIDEO_DIR)
-    p = Path(path)
+    cfg = load_config()
+    default_dir = os.path.expanduser(cfg.get("download_dir") or "~/Videos/OmaPony")
+    path = args.path or default_dir
+    p = Path(os.path.expanduser(path))
     if p.is_file():
         p = p.parent
     p.mkdir(parents=True, exist_ok=True)

@@ -149,8 +149,8 @@ OmaPony stores user configuration in `~/.config/omarchy/omapony/config.json`:
 
 ```json
 {
-  "download_dir": "/home/sierra/Videos/OmaPony",
-  "audio_dir": "/home/sierra/Music/OmaPony",
+  "download_dir": "~/Videos/OmaPony",
+  "audio_dir": "~/Music/OmaPony",
   "default_format": "video",
   "auto_transcribe": false,
   "make_subtitles": true,
