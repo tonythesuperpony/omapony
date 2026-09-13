@@ -243,17 +243,42 @@ Panel {
 
   Component {
     id: horseHeadIconComponent
-    Text {
+    Item {
       anchors.centerIn: parent
-      anchors.horizontalCenterOffset: root.hasActiveDownloads ? 0 : 3.17
-      anchors.verticalCenterOffset: root.hasActiveDownloads ? 0 : 3.0
-      text: root.hasActiveDownloads ? "󰑋" : "\uf7ab"
-      font.family: root.hasActiveDownloads ? (root.bar ? root.bar.fontFamily : Style.font.family) : "Font Awesome 7 Free Solid"
-      font.styleName: root.hasActiveDownloads ? "" : "Solid"
-      font.pixelSize: root.hasActiveDownloads ? Style.bar.iconFont : 9.7
-      color: button.active && button.useActiveColor ? button.activeColor : button.foreground
-      renderType: Text.NativeRendering
-      rotation: root.hasActiveDownloads ? root.spinnerAngle : 0
+      implicitWidth: root.hasActiveDownloads ? Style.space(28) : Style.space(16)
+      implicitHeight: Style.space(20)
+
+      // When Idle: classic Font Awesome horse head icon
+      Text {
+        visible: !root.hasActiveDownloads
+        anchors.centerIn: parent
+        anchors.horizontalCenterOffset: 3.17
+        anchors.verticalCenterOffset: 3.0
+        text: "\uf7ab"
+        font.family: "Font Awesome 7 Free Solid"
+        font.styleName: "Solid"
+        font.pixelSize: 10
+        color: button.active && button.useActiveColor ? button.activeColor : button.foreground
+        renderType: Text.NativeRendering
+      }
+
+      // When Downloading: animated galloping pony sprite!
+      AnimatedSprite {
+        visible: root.hasActiveDownloads
+        anchors.centerIn: parent
+        width: Style.space(26)
+        height: Style.space(19)
+        source: Qt.resolvedUrl("assets/caballoNormal.png")
+        frameWidth: 111
+        frameHeight: 81
+        frameCount: 7
+        frameX: 0
+        frameY: 0
+        frameRate: 12
+        interpolate: false
+        running: root.hasActiveDownloads
+        loops: AnimatedSprite.Infinite
+      }
     }
   }
 
@@ -319,12 +344,13 @@ Panel {
             spacing: Style.space(8)
 
             Rectangle {
-              width: Style.space(32)
+              width: Style.space(38)
               height: Style.space(32)
               radius: Style.cornerRadius
               color: Style.selectedFillFor(Color.foreground, Color.accent)
 
               Text {
+                visible: !root.hasActiveDownloads
                 anchors.centerIn: parent
                 text: "\uf7ab"
                 font.family: "Font Awesome 7 Free Solid"
@@ -332,6 +358,23 @@ Panel {
                 font.pixelSize: Style.font.title
                 color: Color.accent
                 renderType: Text.NativeRendering
+              }
+
+              AnimatedSprite {
+                visible: root.hasActiveDownloads
+                anchors.centerIn: parent
+                width: Style.space(34)
+                height: Style.space(25)
+                source: Qt.resolvedUrl("assets/caballoNormal.png")
+                frameWidth: 111
+                frameHeight: 81
+                frameCount: 7
+                frameX: 0
+                frameY: 0
+                frameRate: 12
+                interpolate: false
+                running: root.opened && root.hasActiveDownloads
+                loops: AnimatedSprite.Infinite
               }
             }
 
@@ -852,6 +895,37 @@ Panel {
                       iconText: "󰅖"
                       tooltipText: "Cancel Download"
                       onClicked: root.cancelJob(modelData.id)
+                    }
+                  }
+
+                  // Galloping Pony tracking download progress
+                  Item {
+                    width: parent.width
+                    height: Style.space(24)
+                    visible: modelData.status === "downloading" || modelData.status === "processing"
+
+                    Item {
+                      width: Style.space(32)
+                      height: Style.space(23)
+                      x: Math.max(0, Math.min(parent.width - width, (parent.width - width) * ((modelData.progress || 0) / 100.0)))
+
+                      Behavior on x {
+                        NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
+                      }
+
+                      AnimatedSprite {
+                        anchors.fill: parent
+                        source: Qt.resolvedUrl("assets/caballoNormal.png")
+                        frameWidth: 111
+                        frameHeight: 81
+                        frameCount: 7
+                        frameX: 0
+                        frameY: 0
+                        frameRate: 12
+                        interpolate: false
+                        running: root.opened && (modelData.status === "downloading" || modelData.status === "processing")
+                        loops: AnimatedSprite.Infinite
+                      }
                     }
                   }
 

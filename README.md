@@ -14,7 +14,7 @@ Featuring automatic platform link detection, high-bitrate video/audio extraction
 
 ## ✨ Features
 
-- **🐴 Sleek Horse Head Bar Widget**: Sits cleanly on the top-right status bar with perfect optical alignment and theme integration. Smoothly transitions into an animated spinner (`󰑋`) with active colors and progress tooltips during live downloads.
+- **🐴 Sleek Horse Bar Widget & Galloping Sprite Animation**: Sits cleanly on the top-right status bar with perfect optical alignment and theme integration. When downloads start, the bar icon dynamically transforms into a live animated galloping pony sprite (`caballoNormal.png`), running at full stride in your status bar, panel header, and tracking along the download progress bar!
 - **⚡ Superkey Instant Link Capture**: Highlight or copy any video/audio URL anywhere on your screen and hit `SUPER + ALT + V` to grab and enqueue the download instantly in the background with desktop notifications.
 - **🚦 Concurrency-Limited Queue**: Intelligent background queue manager with configurable concurrency cap (`max_concurrent: 2`). Never saturates your CPU or bandwidth when batch-grabbing multiple links—active jobs download smoothly while remaining jobs queue safely in line.
 - **⚡ Real-Time Push IPC (Unix Socket)**: Replaced 1-second file polling with a direct Unix domain socket push (`$XDG_RUNTIME_DIR/omapony.sock`). Delivers instantaneous 150ms progress bar animations, live transfer speeds, and ETA ticks without continuous disk polling.
