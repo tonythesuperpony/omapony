@@ -33,9 +33,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Animated Galloping Pony Sprite Sheet Integration**:
   - Integrated `caballoNormal.png` sprite sheet (777x243 px, 7 columns x 3 rows with 111x81 px frames) using native QtQuick `AnimatedSprite`.
-  - When downloading, the top status bar icon dynamically transforms into the animated galloping pony.
   - The modal panel header badge displays the pony galloping at full stride during active downloads.
   - In each active download card, the galloping pony animates smoothly right along the progress bar tracking download completion.
+
+- **Calibrated Bar Icon Optical Alignment**:
+  - Calibrated the standard Font Awesome horse head icon (`\uf7ab`) optical offsets to align sub-pixel perfectly with neighboring system indicators (network, audio, and display).
 
 - **Full Playlist Detection & Queue Fan-Out**:
   - Added automatic playlist detection for YouTube, SoundCloud sets, and supported streaming platforms using `yt-dlp --flat-playlist`.
