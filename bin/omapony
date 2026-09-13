@@ -11,11 +11,14 @@ import re
 import json
 import time
 import shutil
+import socket
+import fcntl
 import urllib.parse
 import urllib.request
 import subprocess
 import argparse
 from pathlib import Path
+from contextlib import contextmanager
 
 # Paths
 HOME = Path.home()
@@ -23,6 +26,7 @@ CONFIG_DIR = HOME / ".config" / "omarchy" / "omapony"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 DATA_DIR = HOME / ".local" / "share" / "omarchy" / "omapony"
 STATE_FILE = DATA_DIR / "state.json"
+STATE_LOCK_FILE = DATA_DIR / ".state.lock"
 MODELS_DIR = DATA_DIR / "models"
 DEFAULT_VIDEO_DIR = HOME / "Videos" / "OmaPony"
 DEFAULT_AUDIO_DIR = HOME / "Music" / "OmaPony"
@@ -35,6 +39,58 @@ DEFAULT_VIDEO_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 
+@contextmanager
+def state_lock():
+    """Advisory file lock to serialize state updates and queue scheduling across processes."""
+    lock_fd = None
+    try:
+        lock_fd = open(STATE_LOCK_FILE, "w")
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        yield
+    except Exception:
+        yield
+    finally:
+        if lock_fd:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                lock_fd.close()
+            except Exception:
+                pass
+
+
+def get_socket_path():
+    runtime_dir = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime_dir and Path(runtime_dir).exists():
+        return Path(runtime_dir) / "omapony.sock"
+    return DATA_DIR / "omapony.sock"
+
+
+def push_ipc(event):
+    """Push real-time event directly to Quickshell BarWidget over Unix socket."""
+    sock_path = get_socket_path()
+    if not sock_path.exists():
+        return
+    try:
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(0.3)
+        s.connect(str(sock_path))
+        payload = json.dumps(event) + "\n"
+        s.sendall(payload.encode("utf-8"))
+        s.close()
+    except Exception:
+        pass
+
+
+def is_pid_running(pid):
+    if not pid or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except OSError:
+        return False
+
+
 def load_config():
     defaults = {
         "download_dir": str(DEFAULT_VIDEO_DIR),
@@ -44,6 +100,7 @@ def load_config():
         "make_subtitles": True,
         "whisper_model": "base",    # "tiny", "base", "small"
         "whisper_engine": "auto",   # "auto", "whisper-cpp", "whisper"
+        "max_concurrent": 2,
         "notify": True
     }
     if not CONFIG_FILE.exists():
@@ -159,8 +216,15 @@ def detect_platform(url):
 
     url_lower = url.lower()
 
-    # YouTube
+    # YouTube (detect playlist vs single video)
     if re.search(r'(?:youtube\.com|youtu\.be)', url_lower):
+        if "list=" in url_lower or "/playlist" in url_lower:
+            return {
+                "id": "youtube",
+                "name": "YouTube Playlist",
+                "icon": "󰑋",
+                "color": "#FF0000"
+            }
         return {
             "id": "youtube",
             "name": "YouTube",
@@ -269,59 +333,58 @@ def get_selection_or_clipboard():
     return None, None
 
 
-def cmd_detect(args):
-    """Detect platform for given URL and output JSON"""
-    url = args.url
-    meta = detect_platform(url)
-    print(json.dumps(meta))
-
-
-def cmd_grab(args):
-    """Grab link from selection/clipboard and initiate download"""
-    url, source = get_selection_or_clipboard()
+def is_playlist_url(url):
     if not url:
-        notify("OmaPony", "No media URL found in selection or clipboard.", urgency="low", icon="dialog-warning")
-        sys.exit(1)
-
-    cfg = load_config()
-    meta = detect_platform(url)
-
-    # Format from args or config
-    fmt = args.format or cfg.get("default_format", "video")
-    transcribe = args.transcribe if args.transcribe is not None else cfg.get("auto_transcribe", False)
-    subtitles = args.subtitles if args.subtitles is not None else cfg.get("make_subtitles", True)
-    model = args.model or cfg.get("whisper_model", "base")
-
-    notify(
-        f"OmaPony • {meta['name']}",
-        f"Captured {fmt.upper()} link from {source}.\nStarting download...",
-        icon="video-x-generic"
-    )
-
-    job_id = add_job(url, fmt, transcribe, subtitles, model)
-    spawn_worker(job_id)
-    print(json.dumps({"status": "queued", "job_id": job_id, "url": url, "platform": meta["name"]}))
+        return False
+    u = url.lower()
+    return "list=" in u or "/playlist" in u or "/sets/" in u
 
 
-def cmd_add(args):
-    """Add a download job manually"""
-    url = extract_url_from_text(args.url) or args.url
-    if not url.startswith("http"):
-        print(json.dumps({"error": "Invalid URL"}), file=sys.stderr)
-        sys.exit(1)
+def extract_playlist_entries(url, max_entries=100):
+    """
+    Extracts entries from a playlist URL using yt-dlp flat-playlist.
+    Returns (playlist_title, list_of_entries) where each entry has url, title, id.
+    """
+    cmd = [
+        "yt-dlp",
+        "--flat-playlist",
+        "-J",
+        "--playlist-end", str(max_entries),
+        url
+    ]
+    try:
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=20)
+        if res.returncode == 0 and res.stdout.strip():
+            data = json.loads(res.stdout)
+            if data.get("_type") == "playlist" and "entries" in data and len(data["entries"]) > 1:
+                playlist_title = data.get("title") or "Playlist"
+                entries = []
+                for entry in data["entries"]:
+                    if not entry:
+                        continue
+                    entry_url = entry.get("url")
+                    entry_id = entry.get("id")
+                    if not entry_url and entry_id:
+                        if "youtube" in url or "youtu.be" in url:
+                            entry_url = f"https://www.youtube.com/watch?v={entry_id}"
+                        else:
+                            entry_url = entry_id
+                    elif entry_url and not entry_url.startswith("http"):
+                        if "youtube" in url or "youtu.be" in url:
+                            entry_url = f"https://www.youtube.com/watch?v={entry_url}"
+                    if entry_url:
+                        entries.append({
+                            "url": entry_url,
+                            "title": entry.get("title") or f"Video {len(entries) + 1}",
+                            "id": entry_id or ""
+                        })
+                return playlist_title, entries
+    except Exception as e:
+        print(f"Playlist extraction error: {e}", file=sys.stderr)
+    return None, []
 
-    cfg = load_config()
-    fmt = args.format or cfg.get("default_format", "video")
-    transcribe = args.transcribe if args.transcribe is not None else cfg.get("auto_transcribe", False)
-    subtitles = args.subtitles if args.subtitles is not None else cfg.get("make_subtitles", True)
-    model = args.model or cfg.get("whisper_model", "base")
 
-    job_id = add_job(url, fmt, transcribe, subtitles, model)
-    spawn_worker(job_id)
-    print(json.dumps({"status": "queued", "job_id": job_id}))
-
-
-def add_job(url, fmt, transcribe, subtitles, model):
+def add_job(url, fmt, transcribe, subtitles, model, title=None):
     meta = detect_platform(url)
     job_id = f"dl_{int(time.time())}_{os.urandom(3).hex()}"
     job = {
@@ -331,7 +394,7 @@ def add_job(url, fmt, transcribe, subtitles, model):
         "platform_id": meta["id"],
         "platform_icon": meta["icon"],
         "platform_color": meta["color"],
-        "title": f"Fetching metadata ({meta['name']})...",
+        "title": title or f"Fetching metadata ({meta['name']})...",
         "format": fmt,
         "transcribe": bool(transcribe),
         "subtitles": bool(subtitles),
@@ -350,16 +413,81 @@ def add_job(url, fmt, transcribe, subtitles, model):
         "created_at": int(time.time())
     }
 
-    state = load_state()
-    state["active"].append(job)
-    save_state(state)
+    with state_lock():
+        state = load_state()
+        state.setdefault("active", []).append(job)
+        save_state(state)
+
     return job_id
+
+
+def process_queue():
+    """
+    Check concurrency limit (max_concurrent) and spawn workers for queued jobs.
+    Called when new jobs are added, when workers finish, or on queue state changes.
+    """
+    to_spawn = []
+    with state_lock():
+        state = load_state()
+        cfg = load_config()
+        max_concurrent = int(cfg.get("max_concurrent", 2))
+        if max_concurrent < 1:
+            max_concurrent = 1
+
+        active_jobs = state.get("active", [])
+        running_count = 0
+
+        # Check health of currently active workers
+        for job in active_jobs:
+            st = job.get("status")
+            if st in ("downloading", "processing"):
+                pid = job.get("pid")
+                if pid and not is_pid_running(pid):
+                    job["status"] = "error"
+                    job["error_message"] = "Process terminated unexpectedly"
+                else:
+                    running_count += 1
+
+        # Spawn queued jobs up to max_concurrent
+        for job in active_jobs:
+            if running_count >= max_concurrent:
+                break
+            if job.get("status") == "queued":
+                job["status"] = "downloading"
+                to_spawn.append(job["id"])
+                running_count += 1
+
+        save_state(state)
+
+    for jid in to_spawn:
+        spawn_worker(jid)
+
+    if to_spawn:
+        push_ipc({"type": "reload"})
 
 
 def spawn_worker(job_id):
     script_path = os.path.abspath(__file__)
     subprocess.Popen(
         [sys.executable, script_path, "_worker", job_id],
+        start_new_session=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        stdin=subprocess.DEVNULL
+    )
+
+
+def spawn_transcribe_worker(job_id, media_file, model, subtitles, title):
+    script_path = os.path.abspath(__file__)
+    subprocess.Popen(
+        [
+            sys.executable, script_path, "_transcribe",
+            job_id,
+            str(media_file),
+            str(model),
+            "1" if subtitles else "0",
+            str(title)
+        ],
         start_new_session=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -474,8 +602,109 @@ def run_offline_whisper(media_file, model_name="base", generate_subtitles=True):
                 pass
 
 
+def cmd_detect(args):
+    """Detect platform for given URL and output JSON"""
+    url = args.url
+    meta = detect_platform(url)
+    print(json.dumps(meta))
+
+
+def cmd_grab(args):
+    """Grab link from selection/clipboard and initiate download with playlist fan-out"""
+    url, source = get_selection_or_clipboard()
+    if not url:
+        notify("OmaPony", "No media URL found in selection or clipboard.", urgency="low", icon="dialog-warning")
+        sys.exit(1)
+
+    cfg = load_config()
+    meta = detect_platform(url)
+
+    fmt = args.format or cfg.get("default_format", "video")
+    transcribe = args.transcribe if args.transcribe is not None else cfg.get("auto_transcribe", False)
+    subtitles = args.subtitles if args.subtitles is not None else cfg.get("make_subtitles", True)
+    model = args.model or cfg.get("whisper_model", "base")
+
+    allow_playlist = args.playlist if args.playlist is not None else True
+    if args.no_playlist:
+        allow_playlist = False
+
+    if allow_playlist and (args.playlist or is_playlist_url(url)):
+        notify(
+            f"OmaPony • {meta['name']}",
+            f"Captured playlist link from {source}.\nInspecting entries...",
+            icon="media-playlist-repeat"
+        )
+        pl_title, entries = extract_playlist_entries(url)
+        if entries and len(entries) > 1:
+            notify(
+                "OmaPony • Playlist Enqueued",
+                f"Queued {len(entries)} items from:\n{pl_title}",
+                icon="media-playlist-repeat"
+            )
+            job_ids = []
+            for entry in entries:
+                jid = add_job(entry["url"], fmt, transcribe, subtitles, model, title=entry.get("title"))
+                job_ids.append(jid)
+            push_ipc({"type": "reload"})
+            process_queue()
+            print(json.dumps({"status": "queued", "count": len(job_ids), "playlist": pl_title, "job_ids": job_ids}))
+            return
+
+    notify(
+        f"OmaPony • {meta['name']}",
+        f"Captured {fmt.upper()} link from {source}.\nStarting download...",
+        icon="video-x-generic"
+    )
+
+    job_id = add_job(url, fmt, transcribe, subtitles, model)
+    push_ipc({"type": "reload"})
+    process_queue()
+    print(json.dumps({"status": "queued", "job_id": job_id, "url": url, "platform": meta["name"]}))
+
+
+def cmd_add(args):
+    """Add a download job manually with automatic playlist detection and fan-out"""
+    url = extract_url_from_text(args.url) or args.url
+    if not url.startswith("http"):
+        print(json.dumps({"error": "Invalid URL"}), file=sys.stderr)
+        sys.exit(1)
+
+    cfg = load_config()
+    fmt = args.format or cfg.get("default_format", "video")
+    transcribe = args.transcribe if args.transcribe is not None else cfg.get("auto_transcribe", False)
+    subtitles = args.subtitles if args.subtitles is not None else cfg.get("make_subtitles", True)
+    model = args.model or cfg.get("whisper_model", "base")
+
+    allow_playlist = args.playlist if args.playlist is not None else True
+    if args.no_playlist:
+        allow_playlist = False
+
+    if allow_playlist and (args.playlist or is_playlist_url(url)):
+        notify("OmaPony • Playlist", "Inspecting playlist entries...", icon="media-playlist-repeat")
+        pl_title, entries = extract_playlist_entries(url)
+        if entries and len(entries) > 1:
+            notify(
+                "OmaPony • Playlist Enqueued",
+                f"Added {len(entries)} items from playlist:\n{pl_title}",
+                icon="media-playlist-repeat"
+            )
+            job_ids = []
+            for entry in entries:
+                jid = add_job(entry["url"], fmt, transcribe, subtitles, model, title=entry.get("title"))
+                job_ids.append(jid)
+            push_ipc({"type": "reload"})
+            process_queue()
+            print(json.dumps({"status": "queued", "count": len(job_ids), "playlist": pl_title, "job_ids": job_ids}))
+            return
+
+    job_id = add_job(url, fmt, transcribe, subtitles, model)
+    push_ipc({"type": "reload"})
+    process_queue()
+    print(json.dumps({"status": "queued", "job_id": job_id}))
+
+
 def cmd_worker(args):
-    """Background worker process executing download and transcription for a job"""
+    """Background worker process executing download for a job"""
     job_id = args.job_id
     state = load_state()
     job = None
@@ -486,6 +715,7 @@ def cmd_worker(args):
 
     if not job:
         print(f"Job {job_id} not found", file=sys.stderr)
+        process_queue()
         return
 
     cfg = load_config()
@@ -494,7 +724,6 @@ def cmd_worker(args):
 
     out_template = str(out_dir / "%(title)s [%(id)s].%(ext)s")
 
-    # Construct yt-dlp command
     cmd = [
         "yt-dlp",
         "--no-playlist",
@@ -513,11 +742,16 @@ def cmd_worker(args):
 
     cmd.append(job["url"])
 
-    update_job_state(job_id, {"status": "downloading", "pid": os.getpid()})
+    with state_lock():
+        update_job_state(job_id, {"status": "downloading", "pid": os.getpid()})
+    push_ipc({"type": "reload"})
 
     final_path = ""
-    last_update_time = 0
+    last_ipc_time = 0
+    last_disk_time = 0
     title = job.get("title", "")
+    if "Fetching metadata" in title:
+        title = ""
 
     try:
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
@@ -526,11 +760,14 @@ def cmd_worker(args):
             line = raw_line.strip()
             if line.startswith("TITLE:"):
                 title = line[6:].strip()
-                update_job_state(job_id, {"title": title})
+                with state_lock():
+                    update_job_state(job_id, {"title": title})
+                push_ipc({"type": "reload"})
 
             elif line.startswith("FINAL:"):
                 final_path = line[6:].strip()
-                update_job_state(job_id, {"output_file": final_path})
+                with state_lock():
+                    update_job_state(job_id, {"output_file": final_path})
 
             elif "PROG:" in line:
                 try:
@@ -543,15 +780,31 @@ def cmd_worker(args):
                     tot_b = int(parts[4]) if len(parts) > 4 and parts[4].isdigit() else 0
 
                     now = time.time()
-                    if now - last_update_time >= 0.4 or pct >= 100.0:
-                        last_update_time = now
-                        update_job_state(job_id, {
+                    # Push IPC near-instantly every 150ms
+                    if now - last_ipc_time >= 0.15 or pct >= 100.0:
+                        last_ipc_time = now
+                        push_ipc({
+                            "type": "progress",
+                            "job_id": job_id,
                             "progress": pct,
                             "speed": spd,
                             "eta": eta,
                             "downloaded_bytes": dl_b,
-                            "total_bytes": tot_b
+                            "total_bytes": tot_b,
+                            "title": title
                         })
+
+                    # Throttle state.json disk writes to every 1.5s
+                    if now - last_disk_time >= 1.5 or pct >= 100.0:
+                        last_disk_time = now
+                        with state_lock():
+                            update_job_state(job_id, {
+                                "progress": pct,
+                                "speed": spd,
+                                "eta": eta,
+                                "downloaded_bytes": dl_b,
+                                "total_bytes": tot_b
+                            })
                 except Exception:
                     pass
 
@@ -559,107 +812,153 @@ def cmd_worker(args):
 
         if proc.returncode != 0:
             err = f"yt-dlp exited with code {proc.returncode}"
-            update_job_state(job_id, {"status": "error", "error_message": err})
+            with state_lock():
+                update_job_state(job_id, {"status": "error", "error_message": err})
             notify("OmaPony", f"Failed to download {title or job['url']}", urgency="critical", icon="dialog-error")
+            push_ipc({"type": "reload"})
+            process_queue()
             return
 
-        # If final_path was not captured through after_move hook, locate newest matching file
         if not final_path or not Path(final_path).exists():
             files = sorted(out_dir.glob("*"), key=lambda f: f.stat().st_mtime, reverse=True)
             if files:
                 final_path = str(files[0])
 
-        update_job_state(job_id, {"progress": 100.0, "status": "processing", "output_file": final_path})
+        should_transcribe = bool(job.get("transcribe")) and bool(final_path)
 
-        subtitles_file = ""
-        transcript_file = ""
-
-        # Step: Offline Whisper Transcription
-        if job.get("transcribe") and final_path:
-            update_job_state(job_id, {"status": "transcribing", "progress": 99.0})
-            notify(
-                "Whisper Offline AI",
-                f"Transcribing '{title}' offline using Whisper {job.get('model', 'base')}...",
-                icon="audio-x-generic"
-            )
-
-            srt_res, txt_res = run_offline_whisper(
-                final_path,
-                model_name=job.get("model", "base"),
-                generate_subtitles=job.get("subtitles", True)
-            )
-            subtitles_file = srt_res or ""
-            transcript_file = txt_res or ""
-
-        # Move to history
-        state = load_state()
-        history_entry = None
-        new_active = []
-        for j in state.get("active", []):
-            if j.get("id") == job_id:
-                history_entry = {
-                    "id": job_id,
-                    "url": j["url"],
-                    "platform": j["platform"],
-                    "platform_id": j.get("platform_id", "web"),
-                    "platform_icon": j["platform_icon"],
-                    "platform_color": j["platform_color"],
-                    "title": title or Path(final_path).name,
-                    "format": j["format"],
-                    "transcribed": bool(job.get("transcribe")),
-                    "has_subtitles": bool(subtitles_file),
-                    "output_file": final_path,
-                    "subtitles_file": subtitles_file,
-                    "transcript_file": transcript_file,
-                    "file_size": f"{Path(final_path).stat().st_size / (1024*1024):.1f} MB" if final_path and Path(final_path).exists() else "",
-                    "completed_at": int(time.time())
-                }
-            else:
-                new_active.append(j)
-
-        state["active"] = new_active
-        if history_entry:
+        # Move to history IMMEDIATELY so user can access downloaded media right away
+        with state_lock():
+            state = load_state()
+            history_entry = {
+                "id": job_id,
+                "url": job["url"],
+                "platform": job["platform"],
+                "platform_id": job.get("platform_id", "web"),
+                "platform_icon": job["platform_icon"],
+                "platform_color": job["platform_color"],
+                "title": title or Path(final_path).name,
+                "format": job["format"],
+                "transcribed": should_transcribe,
+                "transcribing": should_transcribe,
+                "has_subtitles": False,
+                "output_file": final_path,
+                "subtitles_file": "",
+                "transcript_file": "",
+                "file_size": f"{Path(final_path).stat().st_size / (1024*1024):.1f} MB" if final_path and Path(final_path).exists() else "",
+                "completed_at": int(time.time())
+            }
+            state["active"] = [j for j in state.get("active", []) if j.get("id") != job_id]
             state.setdefault("history", []).insert(0, history_entry)
-            state["history"] = state["history"][:40]  # Keep last 40 entries
-        save_state(state)
+            state["history"] = state["history"][:50]
+            save_state(state)
+
+        push_ipc({"type": "reload"})
 
         # Completion notification
-        sub_info = "\nSubtitles & transcript generated." if subtitles_file else ""
         notify(
             f"✓ Download Complete • {job['platform']}",
-            f"{title or Path(final_path).name}\nSaved to {Path(final_path).parent}{sub_info}",
+            f"{title or Path(final_path).name}\nSaved to {Path(final_path).parent}",
             icon="video-x-generic"
         )
 
+        # Immediately free queue slot so next download begins without waiting for Whisper
+        process_queue()
+
+        # Detached background transcription
+        if should_transcribe:
+            spawn_transcribe_worker(
+                job_id=job_id,
+                media_file=final_path,
+                model=job.get("model", "base"),
+                subtitles=job.get("subtitles", True),
+                title=title or Path(final_path).name
+            )
+
     except Exception as e:
-        update_job_state(job_id, {"status": "error", "error_message": str(e)})
+        with state_lock():
+            update_job_state(job_id, {"status": "error", "error_message": str(e)})
         notify("OmaPony", f"Error: {e}", urgency="critical", icon="dialog-error")
+        push_ipc({"type": "reload"})
+        process_queue()
+
+
+def cmd_transcribe(args):
+    """Background worker for detached Whisper AI transcription"""
+    job_id = args.job_id
+    media_file = args.media_file
+    model = args.model
+    subtitles = args.subtitles == "1"
+    title = args.title
+
+    notify(
+        "Whisper Offline AI",
+        f"Transcribing '{title}' offline using Whisper {model}...",
+        icon="audio-x-generic"
+    )
+
+    srt_res, txt_res = run_offline_whisper(
+        media_file,
+        model_name=model,
+        generate_subtitles=subtitles
+    )
+
+    with state_lock():
+        state = load_state()
+        for item in state.get("history", []):
+            if item.get("id") == job_id:
+                item["transcribing"] = False
+                item["subtitles_file"] = srt_res or ""
+                item["transcript_file"] = txt_res or ""
+                item["has_subtitles"] = bool(srt_res)
+                break
+        save_state(state)
+
+    push_ipc({"type": "reload"})
+
+    if srt_res:
+        notify(
+            "✓ Subtitles Ready • Whisper AI",
+            f"Generated subtitles for {title}",
+            icon="audio-x-generic"
+        )
+    else:
+        notify(
+            "✓ Transcription Ready • Whisper AI",
+            f"Transcript generated for {title}",
+            icon="audio-x-generic"
+        )
 
 
 def cmd_cancel(args):
-    """Cancel an active download"""
+    """Cancel an active download or queued job"""
     job_id = args.job_id
-    state = load_state()
-    target = None
-    for j in state.get("active", []):
-        if j.get("id") == job_id:
-            target = j
-            break
-    if target and target.get("pid"):
-        try:
-            os.kill(target["pid"], 9)
-        except Exception:
-            pass
-    state["active"] = [j for j in state.get("active", []) if j.get("id") != job_id]
-    save_state(state)
+    with state_lock():
+        state = load_state()
+        target = None
+        for j in state.get("active", []):
+            if j.get("id") == job_id:
+                target = j
+                break
+        if target and target.get("pid"):
+            try:
+                os.kill(target["pid"], 9)
+            except Exception:
+                pass
+        state["active"] = [j for j in state.get("active", []) if j.get("id") != job_id]
+        save_state(state)
+
+    push_ipc({"type": "reload"})
+    process_queue()
     print(json.dumps({"status": "cancelled", "job_id": job_id}))
 
 
 def cmd_clear_history(args):
     """Clear completed downloads history"""
-    state = load_state()
-    state["history"] = []
-    save_state(state)
+    with state_lock():
+        state = load_state()
+        state["history"] = []
+        save_state(state)
+    push_ipc({"type": "reload"})
     print(json.dumps({"status": "cleared"}))
 
 
@@ -687,8 +986,10 @@ def cmd_toggle(args):
 
 
 def cmd_status(args):
-    """Output current state in JSON"""
-    st = load_state()
+    """Output current state in JSON after validating queue health"""
+    process_queue()
+    with state_lock():
+        st = load_state()
     print(json.dumps(st, indent=2))
 
 
@@ -731,6 +1032,8 @@ def main():
     p_grab.add_argument("--no-transcribe", action="store_false", dest="transcribe")
     p_grab.add_argument("--subtitles", action="store_true", default=None)
     p_grab.add_argument("--model", choices=["tiny", "base", "small"], default=None)
+    p_grab.add_argument("--playlist", action="store_true", default=None, help="Force playlist extraction")
+    p_grab.add_argument("--no-playlist", action="store_true", default=False, help="Do not extract playlist")
 
     # add: manual URL download
     p_add = subparsers.add_parser("add", help="Add URL to download queue")
@@ -739,13 +1042,15 @@ def main():
     p_add.add_argument("--transcribe", action="store_true", default=False)
     p_add.add_argument("--subtitles", action="store_true", default=True)
     p_add.add_argument("--model", choices=["tiny", "base", "small"], default="base")
+    p_add.add_argument("--playlist", action="store_true", default=None, help="Force playlist extraction")
+    p_add.add_argument("--no-playlist", action="store_true", default=False, help="Do not extract playlist")
 
     # detect
     p_detect = subparsers.add_parser("detect", help="Detect platform for URL")
     p_detect.add_argument("url", help="URL to inspect")
 
     # cancel
-    p_cancel = subparsers.add_parser("cancel", help="Cancel active job")
+    p_cancel = subparsers.add_parser("cancel", help="Cancel active or queued job")
     p_cancel.add_argument("job_id", help="Job ID to cancel")
 
     # clear-history
@@ -772,6 +1077,14 @@ def main():
     p_worker = subparsers.add_parser("_worker", help=argparse.SUPPRESS)
     p_worker.add_argument("job_id", help="Job ID")
 
+    # internal detached transcription worker
+    p_transcribe = subparsers.add_parser("_transcribe", help=argparse.SUPPRESS)
+    p_transcribe.add_argument("job_id", help="Job ID")
+    p_transcribe.add_argument("media_file", help="Media File Path")
+    p_transcribe.add_argument("model", help="Whisper Model")
+    p_transcribe.add_argument("subtitles", help="Subtitles Flag")
+    p_transcribe.add_argument("title", help="Media Title")
+
     args = parser.parse_args()
 
     if not args.command or args.command in ("summon", "toggle"):
@@ -796,6 +1109,8 @@ def main():
         cmd_install_whisper(args)
     elif args.command == "_worker":
         cmd_worker(args)
+    elif args.command == "_transcribe":
+        cmd_transcribe(args)
 
 
 if __name__ == "__main__":

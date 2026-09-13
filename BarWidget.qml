@@ -18,6 +18,11 @@ Panel {
 
   // State
   readonly property string statePath: Quickshell.env("HOME") + "/.local/share/omarchy/omapony/state.json"
+  readonly property string socketPath: {
+    var rt = Quickshell.env("XDG_RUNTIME_DIR")
+    if (rt && rt !== "") return rt + "/omapony.sock"
+    return Quickshell.env("HOME") + "/.local/share/omarchy/omapony/omapony.sock"
+  }
   property var stateData: ({ "active": [], "history": [], "whisper_available": false, "whisper_engine": "none" })
   readonly property var activeJobs: stateData && stateData.active ? stateData.active : []
   readonly property var historyJobs: stateData && stateData.history ? stateData.history : []
@@ -45,10 +50,27 @@ Panel {
     onTriggered: root.spinnerAngle = (root.spinnerAngle + 30) % 360
   }
 
-  // Periodic poll to refresh state from disk if external processes download
+  // Push IPC Socket Server: receives near-instant progress & state pushes from workers
+  SocketServer {
+    id: ipcServer
+    path: root.socketPath
+    active: true
+    handler: Component {
+      Socket {
+        parser: SplitParser {
+          splitMarker: "\n"
+          onRead: function(line) {
+            root.handleIpcMessage(line)
+          }
+        }
+      }
+    }
+  }
+
+  // Low-overhead fallback heartbeat timer (near-instant updates are handled via push IPC socket)
   Timer {
-    interval: 1000
-    running: root.opened || root.hasActiveDownloads
+    interval: 10000
+    running: root.opened
     repeat: true
     onTriggered: stateFile.reload()
   }
@@ -74,6 +96,44 @@ Panel {
     onFileChanged: reload()
   }
 
+  function handleIpcMessage(line) {
+    try {
+      if (!line || line.trim() === "") return
+      var msg = JSON.parse(line.trim())
+      if (msg.type === "progress") {
+        updateJobProgress(msg.job_id, msg.progress, msg.speed, msg.eta, msg.title)
+      } else if (msg.type === "reload") {
+        stateFile.reload()
+      } else if (msg.type === "state" && msg.data) {
+        root.stateData = msg.data
+      }
+    } catch (e) {
+      // Ignore malformed push lines
+    }
+  }
+
+  function updateJobProgress(jobId, pct, spd, eta, title) {
+    if (!root.stateData || !root.stateData.active) return
+    var list = root.stateData.active
+    var changed = false
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].id === jobId) {
+        list[i].progress = pct
+        if (spd) list[i].speed = spd
+        if (eta) list[i].eta = eta
+        if (title && (!list[i].title || list[i].title.indexOf("Fetching metadata") !== -1)) {
+          list[i].title = title
+        }
+        list[i].status = "downloading"
+        changed = true
+        break
+      }
+    }
+    if (changed) {
+      root.stateData = Object.assign({}, root.stateData, { active: list.slice(0) })
+    }
+  }
+
   function loadState(raw) {
     try {
       if (raw && raw.trim() !== "") {
@@ -91,6 +151,9 @@ Panel {
     var lower = trimmed.toLowerCase()
 
     if (lower.indexOf("youtube.com") !== -1 || lower.indexOf("youtu.be") !== -1) {
+      if (lower.indexOf("list=") !== -1 || lower.indexOf("/playlist") !== -1) {
+        return { id: "youtube-playlist", name: "YouTube Playlist", icon: "󰑋", color: "#FF0000" }
+      }
       return { id: "youtube", name: "YouTube", icon: "󰗃", color: "#FF0000" }
     }
     if (lower.indexOf("x.com") !== -1 || lower.indexOf("twitter.com") !== -1) {
@@ -109,6 +172,9 @@ Panel {
       return { id: "reddit", name: "Reddit", icon: "󰑍", color: "#FF4500" }
     }
     if (lower.indexOf("http://") === 0 || lower.indexOf("https://") === 0) {
+      if (lower.indexOf("list=") !== -1 || lower.indexOf("/playlist") !== -1) {
+        return { id: "playlist", name: "Media Playlist", icon: "󰑋", color: Color.accent }
+      }
       return { id: "web", name: "Web Video", icon: "󰈫", color: Color.accent }
     }
     return null
@@ -746,6 +812,26 @@ Panel {
                       color: Color.foreground
                     }
 
+                    // Queued badge
+                    Rectangle {
+                      visible: modelData.status === "queued"
+                      implicitWidth: queueTxt.implicitWidth + Style.space(8)
+                      implicitHeight: Style.space(18)
+                      radius: Style.cornerRadius
+                      color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.15)
+                      border.color: Color.accent
+                      border.width: 1
+                      Text {
+                        id: queueTxt
+                        anchors.centerIn: parent
+                        text: "QUEUED"
+                        font.family: Style.font.family
+                        font.pixelSize: Style.font.caption
+                        font.bold: true
+                        color: Color.accent
+                      }
+                    }
+
                     // Format badge
                     Rectangle {
                       implicitWidth: fmtTxt.implicitWidth + Style.space(8)
@@ -778,12 +864,12 @@ Panel {
 
                     Rectangle {
                       height: parent.height
-                      width: Math.max(0, Math.min(parent.width, parent.width * ((modelData.progress || 0) / 100.0)))
+                      width: modelData.status === "queued" ? 0 : Math.max(0, Math.min(parent.width, parent.width * ((modelData.progress || 0) / 100.0)))
                       radius: Style.space(3)
                       color: Color.accent
 
                       Behavior on width {
-                        NumberAnimation { duration: 250; easing.type: Easing.OutQuad }
+                        NumberAnimation { duration: 150; easing.type: Easing.OutQuad }
                       }
                     }
                   }
@@ -794,14 +880,16 @@ Panel {
 
                     Text {
                       Layout.fillWidth: true
-                      text: modelData.status === "transcribing"
-                        ? "󰍬 Transcribing offline with Whisper..."
-                        : ((modelData.progress ? (modelData.progress.toFixed(1) + "%") : "0%") +
-                           (modelData.speed && modelData.speed !== "--" ? (" • " + modelData.speed) : "") +
-                           (modelData.eta && modelData.eta !== "--" ? (" • ETA " + modelData.eta) : ""))
+                      text: modelData.status === "queued"
+                        ? "󰄱 Queued (waiting for worker slot)..."
+                        : (modelData.status === "transcribing"
+                          ? "󰍬 Transcribing offline with Whisper..."
+                          : ((modelData.progress ? (modelData.progress.toFixed(1) + "%") : "0%") +
+                             (modelData.speed && modelData.speed !== "--" ? (" • " + modelData.speed) : "") +
+                             (modelData.eta && modelData.eta !== "--" ? (" • ETA " + modelData.eta) : "")))
                       font.family: Style.font.family
                       font.pixelSize: Style.font.caption
-                      color: Qt.darker(Color.foreground, 1.3)
+                      color: modelData.status === "queued" ? Color.accent : Qt.darker(Color.foreground, 1.3)
                     }
                   }
                 }
@@ -884,7 +972,38 @@ Panel {
                       }
 
                       Rectangle {
-                        visible: !!modelData.has_subtitles
+                        visible: !!modelData.transcribing
+                        implicitWidth: transcribingBadge.implicitWidth + Style.space(8)
+                        implicitHeight: Style.space(16)
+                        radius: Style.cornerRadius
+                        color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.18)
+                        border.color: Qt.rgba(Color.accent.r, Color.accent.g, Color.accent.b, 0.4)
+                        border.width: 1
+
+                        Row {
+                          id: transcribingBadge
+                          anchors.centerIn: parent
+                          spacing: Style.space(4)
+
+                          Text {
+                            text: "󰍬"
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            color: Color.accent
+                          }
+
+                          Text {
+                            text: "Transcribing..."
+                            font.family: Style.font.family
+                            font.pixelSize: Style.font.caption
+                            font.bold: true
+                            color: Color.accent
+                          }
+                        }
+                      }
+
+                      Rectangle {
+                        visible: !!modelData.has_subtitles && !modelData.transcribing
                         implicitWidth: subBadge.implicitWidth + Style.space(6)
                         implicitHeight: Style.space(16)
                         radius: Style.cornerRadius

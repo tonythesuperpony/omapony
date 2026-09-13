@@ -16,13 +16,17 @@ Featuring automatic platform link detection, high-bitrate video/audio extraction
 
 - **🐴 Sleek Horse Head Bar Widget**: Sits cleanly on the top-right status bar with perfect optical alignment and theme integration. Smoothly transitions into an animated spinner (`󰑋`) with active colors and progress tooltips during live downloads.
 - **⚡ Superkey Instant Link Capture**: Highlight or copy any video/audio URL anywhere on your screen and hit `SUPER + ALT + V` to grab and enqueue the download instantly in the background with desktop notifications.
-- **🎙️ 100% Offline Whisper AI Transcription**:
+- **🚦 Concurrency-Limited Queue**: Intelligent background queue manager with configurable concurrency cap (`max_concurrent: 2`). Never saturates your CPU or bandwidth when batch-grabbing multiple links—active jobs download smoothly while remaining jobs queue safely in line.
+- **⚡ Real-Time Push IPC (Unix Socket)**: Replaced 1-second file polling with a direct Unix domain socket push (`$XDG_RUNTIME_DIR/omapony.sock`). Delivers instantaneous 150ms progress bar animations, live transfer speeds, and ETA ticks without continuous disk polling.
+- **📑 Automatic Playlist Support & Fan-Out**: Automatically detects multi-video playlists (YouTube, SoundCloud sets, etc.) and fans them out into individual queued jobs with real video titles. Paste one playlist link and watch all videos populate the queue.
+- **🎙️ Async / Detached Offline Whisper AI**:
   - Local speech-to-text running directly on your hardware via `whisper.cpp` (`whisper-cli`).
+  - **Detached execution**: Downloads finish and pop into history immediately so you can play or access them right away, while Whisper continues transcribing in the background.
   - Zero cloud reliance, zero subscriptions, zero API keys, and 100% private.
   - Generates synchronized SubRip (`.srt`) and WebVTT (`.vtt`) subtitles (automatically recognized by MPV, VLC, and other players) along with full plaintext transcripts (`.txt`).
   - Model selection: `tiny` (fastest), `base` (recommended default), and `small`.
 - **🎯 Multi-Platform Auto-Detection**: Real-time link inspection with platform-colored badges and icons:
-  - **YouTube** (`󰗃 YouTube` — Red accent)
+  - **YouTube & Playlists** (`󰗃 YouTube` / `󰑋 YouTube Playlist` — Red accent)
   - **X / Twitter** (`󰕄 X / Twitter` — Blue accent)
   - **Instagram** (`󰋙 Instagram` — Magenta accent)
   - **Facebook** (`󰈦 Facebook` — Blue accent)
@@ -34,9 +38,9 @@ Featuring automatic platform link detection, high-bitrate video/audio extraction
   - **Audio Only (MP3)**: Extracts clean, high-fidelity 320kbps MP3 audio.
 - **📋 Themed Quickshell Modal**:
   - One-click clipboard link insertion.
-  - Live progress bar, download speed, and ETA tracking.
-  - Active downloads list with cancel controls.
-  - History list with one-click media play (`󰐊`) and show-in-folder (`󰉋`) actions.
+  - Live progress bar, download speed, ETA tracking, and Queued badges.
+  - Active downloads list with instant cancellation controls.
+  - History list with active "󰍬 Transcribing..." badges, subtitle indicators, one-click media play (`󰐊`), and show-in-folder (`󰉋`) actions.
 - **💻 CLI & Shell IPC**: Complete terminal and script control via `omapony` CLI and `omarchy-shell omapony <action>`.
 
 ---
@@ -115,15 +119,55 @@ omapony grab --format audio --transcribe --subtitles
 # Manually queue a URL
 omapony add "https://www.youtube.com/watch?v=..." --format video
 
+# Queue a playlist (auto-detects and fans out into queued jobs)
+omapony add "https://www.youtube.com/playlist?list=..."
+
+# Force single item even if playlist URL:
+omapony add "https://www.youtube.com/watch?v=...&list=..." --no-playlist
+
 # Toggle the status bar popup panel
 omapony toggle
 
 # Check active queue and history status in JSON
 omapony status
 
+# Cancel an active or queued download
+omapony cancel dl_1789265324_5e94b6
+
 # Clear download history
 omapony clear-history
 ```
+
+---
+
+## ⚙️ Configuration
+
+OmaPony stores user configuration in `~/.config/omarchy/omapony/config.json`:
+
+```json
+{
+  "download_dir": "/home/sierra/Videos/OmaPony",
+  "audio_dir": "/home/sierra/Music/OmaPony",
+  "default_format": "video",
+  "auto_transcribe": false,
+  "make_subtitles": true,
+  "whisper_model": "base",
+  "whisper_engine": "auto",
+  "max_concurrent": 2,
+  "notify": true
+}
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `max_concurrent` | `2` | Maximum concurrent yt-dlp & ffmpeg workers before queuing |
+| `default_format` | `"video"` | Default format: `"video"` (MP4) or `"audio"` (MP3) |
+| `auto_transcribe` | `false` | Automatically transcribe all downloads with Whisper AI |
+| `make_subtitles` | `true` | Generate `.srt` and `.vtt` alongside plaintext transcripts |
+| `whisper_model` | `"base"` | Model size: `"tiny"` (fastest), `"base"`, or `"small"` |
+| `download_dir` | `~/Videos/OmaPony` | Default video destination directory |
+| `audio_dir` | `~/Music/OmaPony` | Default audio destination directory |
+| `notify` | `true` | Desktop notifications via `notify-send` |
 
 ---
 
