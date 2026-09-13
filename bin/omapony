@@ -737,6 +737,43 @@ def cmd_grab(args):
     subtitles = args.subtitles if args.subtitles is not None else cfg.get("make_subtitles", True)
     model = args.model or cfg.get("whisper_model", "base")
 
+    # If this is a playlist/mix and no explicit flag (--playlist / --no-playlist) was given,
+    # prompt the user via OmaPony UI so they can choose single video vs full playlist!
+    if info["is_playlist"] and not args.playlist and not args.no_playlist:
+        opened = False
+        try:
+            res = subprocess.run(
+                ["omarchy-shell", "omapony", "prompt", url],
+                capture_output=True,
+                text=True,
+                timeout=1.5
+            )
+            if res.returncode == 0:
+                opened = True
+        except Exception:
+            pass
+
+        if opened:
+            notify(
+                f"OmaPony • {meta['name']}",
+                f"Captured playlist link from {source}.\nOpened OmaPony to choose options.",
+                icon="media-playlist-repeat"
+            )
+            print(json.dumps({
+                "status": "prompted",
+                "url": url,
+                "platform": meta["name"],
+                "has_single_video": info["has_single_video"],
+                "message": "Opened OmaPony UI to choose download mode"
+            }))
+            return
+        else:
+            notify(
+                "OmaPony • Playlist Warning",
+                "Captured link contains playlist parameters.\nDefaulting to single video. Pass --playlist to download all.",
+                icon="media-playlist-repeat"
+            )
+
     allow_playlist = False
     if args.playlist:
         allow_playlist = True
@@ -828,6 +865,17 @@ def cmd_add(args):
             process_queue()
             print(json.dumps({"status": "queued", "count": len(job_ids), "playlist": pl_title, "job_ids": job_ids}))
             return
+
+    if info["is_playlist"] and not allow_playlist:
+        notify(
+            "OmaPony • Single Video Selected",
+            "URL contains playlist parameters. Downloading single video only.\nPass --playlist to queue entire playlist.",
+            icon="media-playlist-repeat"
+        )
+        print(
+            "Notice: URL contains playlist parameters. Defaulting to single video. Pass --playlist to download entire playlist.",
+            file=sys.stderr
+        )
 
     target_url = info["single_url"] if (info["has_single_video"] and not allow_playlist) else url
     job_id = add_job(target_url, fmt, transcribe, subtitles, model)

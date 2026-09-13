@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.1.3] - 2026-09-13
+
+### 🐛 Fixed
+- **Collapsed Playlist Warning Banner**: Fixed height calculation and clipping for `playlistWarningBanner` in `BarWidget.qml` so that the amber warning banner is rendered visibly when a playlist or YouTube mix URL is input or pasted.
+- **Silent Single-Video Bypass on Enter**: Fixed `urlInput.onAccepted` in `BarWidget.qml` to open the playlist confirmation modal instead of silently starting single-video download when playlist parameters are detected.
+- **Silent Grab Default for Playlists**: Fixed `omapony grab` (`SUPER + ALT + V`) to summon OmaPony via IPC `prompt(url)` when capturing a playlist/mix link without explicit CLI flags, allowing the user to choose between single-video and full-playlist download instead of silently downloading only the first video.
+- **Clean Modal State on Dismiss**: Reset `showPlaylistConfirm` to `false` when OmaPony panel closes, preventing leftover modal dialogs on future opens.
+
+### 🚀 Added & Improved
+- **3-Way Playlist Decision Modal**: Upgraded confirmation dialog to a 3-way decision card for links containing both an individual video and an attached playlist/mix (such as YouTube mixes `list=RD...`), offering distinct choices for `Download Single Video Only`, `Download Entire Playlist`, and `Cancel`.
+- **IPC Prompt Method**: Added `prompt(targetUrl: string)` to OmaPony's `IpcHandler`, enabling external desktop tools, scripts, and keybindings to summon OmaPony with the link pre-loaded and confirmation modal active.
+- **CLI Playlist Warnings**: Added explicit notifications and stderr notices to `omapony add` and `omapony grab` when downloading a single video from a link containing playlist parameters, reminding users that `--playlist` can be passed to queue all items.
+
+---
+
 ## [1.1.2] - 2026-09-13
 
 ### 🐛 Fixed

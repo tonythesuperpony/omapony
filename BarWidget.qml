@@ -23,6 +23,14 @@ Panel {
     function toggle(): void { root.toggle() }
     function reload(): void { stateFile.reload() }
     function progress(payload: string): void { stateFile.reload() }
+    function prompt(targetUrl: string): void {
+      urlInput.text = targetUrl
+      root.open()
+      root.showPlaylistConfirm = true
+      Qt.callLater(function() {
+        if (root.opened) urlInput.forceActiveFocus()
+      })
+    }
   }
 
   implicitWidth: button.implicitWidth
@@ -145,6 +153,8 @@ Panel {
       Qt.callLater(function() {
         if (root.opened) urlInput.forceActiveFocus()
       })
+    } else {
+      root.showPlaylistConfirm = false
     }
   }
 
@@ -294,13 +304,8 @@ Panel {
 
     if (info && info.isPlaylist) {
       if (!mode) {
-        if (info.hasSingleVideo) {
-          targetUrl = info.singleUrl || rawUrl
-          forceFlag = "--no-playlist"
-        } else {
-          root.showPlaylistConfirm = true
-          return
-        }
+        root.showPlaylistConfirm = true
+        return
       } else if (mode === "single") {
         targetUrl = info.singleUrl || rawUrl
         forceFlag = "--no-playlist"
@@ -622,12 +627,16 @@ Panel {
                 Layout.fillWidth: true
                 placeholderText: "Paste YouTube, X, Instagram, Facebook link..."
                 onAccepted: {
-                  if (root.mediaUrlInfo && root.mediaUrlInfo.isPlaylist) {
-                    if (root.mediaUrlInfo.hasSingleVideo) {
+                  if (root.showPlaylistConfirm) {
+                    if (root.mediaUrlInfo && root.mediaUrlInfo.hasSingleVideo) {
                       root.startDownload("single")
                     } else {
-                      root.confirmPlaylistDownload()
+                      root.startDownload("playlist")
                     }
+                    return
+                  }
+                  if (root.mediaUrlInfo && root.mediaUrlInfo.isPlaylist) {
+                    root.confirmPlaylistDownload()
                   } else {
                     root.startDownload()
                   }
@@ -695,9 +704,11 @@ Panel {
 
             // Playlist / Mix Warning Banner
             Rectangle {
+              id: playlistWarningBanner
               visible: root.mediaUrlInfo && root.mediaUrlInfo.isPlaylist
               width: parent.width
-              implicitHeight: visible ? (plNoticeCol.implicitHeight + Style.space(16)) : 0
+              height: visible ? (plNoticeCol.implicitHeight + Style.space(16)) : 0
+              clip: true
               radius: Style.cornerRadius
               color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.09)
               border.color: Qt.rgba(Color.urgent.r, Color.urgent.g, Color.urgent.b, 0.4)
@@ -705,7 +716,9 @@ Panel {
 
               Column {
                 id: plNoticeCol
-                anchors.fill: parent
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
                 anchors.margins: Style.space(8)
                 spacing: Style.space(4)
 
@@ -732,7 +745,7 @@ Panel {
                   width: parent.width
                   wrapMode: Text.Wrap
                   text: (root.mediaUrlInfo && root.mediaUrlInfo.hasSingleVideo)
-                    ? "This link points to a single video with an attached playlist/mix. You can download just this track or the entire playlist below."
+                    ? "This link points to a single video with an attached playlist/mix. You can choose to download only this single video or queue the entire playlist below."
                     : "This link contains an entire playlist. Downloading will queue all individual tracks from the playlist."
                   font.family: Style.font.family
                   font.pixelSize: Style.font.caption
@@ -1412,16 +1425,148 @@ Panel {
         }
       }
 
-      ConfirmDialog {
+      // Playlist / Mix Confirmation Modal Overlay
+      Rectangle {
+        id: playlistConfirmModal
         anchors.fill: parent
-        opened: root.showPlaylistConfirm
-        message: "This link points to an entire playlist and will queue all items. Are you sure you want to download the full playlist?"
-        cancelText: "Cancel"
-        confirmText: "Download All"
-        onCanceled: root.showPlaylistConfirm = false
-        onConfirmed: {
-          root.showPlaylistConfirm = false
-          root.startDownload("playlist")
+        visible: root.showPlaylistConfirm
+        z: 100
+        color: Util.alpha(Color.background, 0.75)
+
+        MouseArea {
+          anchors.fill: parent
+          onClicked: root.showPlaylistConfirm = false
+        }
+
+        BorderSurface {
+          id: confirmCard
+          width: Math.min(parent.width - Style.space(32), Style.space(380))
+          height: cardContentCol.implicitHeight + Style.space(32)
+          anchors.centerIn: parent
+          color: Color.background
+          borderSpec: Border.flat(Color.accent, Style.normalBorderWidth)
+          radius: Style.cornerRadius
+
+          MouseArea {
+            anchors.fill: parent
+            onClicked: {} // Absorb clicks inside card
+          }
+
+          Column {
+            id: cardContentCol
+            anchors.left: parent.left
+            anchors.right: parent.right
+            anchors.top: parent.top
+            anchors.margins: Style.space(16)
+            spacing: Style.space(12)
+
+            Row {
+              spacing: Style.space(8)
+
+              Text {
+                text: "󰑋"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.title
+                color: Color.accent
+              }
+
+              Text {
+                text: (root.mediaUrlInfo && root.mediaUrlInfo.hasSingleVideo)
+                  ? "Playlist / Mix Detected"
+                  : "Queue Entire Playlist?"
+                font.family: Style.font.family
+                font.pixelSize: Style.font.title
+                font.bold: true
+                color: Color.foreground
+              }
+            }
+
+            Text {
+              width: parent.width
+              wrapMode: Text.Wrap
+              font.family: Style.font.family
+              font.pixelSize: Style.font.body
+              color: Color.foreground
+              text: (root.mediaUrlInfo && root.mediaUrlInfo.hasSingleVideo)
+                ? "This link contains both an individual video and an attached playlist/mix. Choose whether to download only this single video or queue the entire playlist."
+                : "This link points to an entire playlist and will queue all individual tracks. Are you sure you want to download the entire playlist?"
+            }
+
+            // Options for video + playlist mix
+            Column {
+              width: parent.width
+              spacing: Style.space(8)
+              visible: root.mediaUrlInfo && root.mediaUrlInfo.hasSingleVideo
+              height: visible ? implicitHeight : 0
+
+              Button {
+                width: parent.width
+                text: "Download Single Video Only"
+                iconText: "󰕧"
+                selected: true
+                accent: Color.accent
+                fontSize: Style.font.caption
+                onClicked: {
+                  root.showPlaylistConfirm = false
+                  root.startDownload("single")
+                }
+              }
+
+              Button {
+                width: parent.width
+                text: "Download Entire Playlist"
+                iconText: "󰑋"
+                selected: false
+                fontSize: Style.font.caption
+                onClicked: {
+                  root.showPlaylistConfirm = false
+                  root.startDownload("playlist")
+                }
+              }
+
+              Button {
+                width: parent.width
+                text: "Cancel"
+                iconText: "󰅖"
+                selected: false
+                fontSize: Style.font.caption
+                onClicked: {
+                  root.showPlaylistConfirm = false
+                }
+              }
+            }
+
+            // Options for pure playlist
+            RowLayout {
+              width: parent.width
+              spacing: Style.space(8)
+              visible: !root.mediaUrlInfo || !root.mediaUrlInfo.hasSingleVideo
+              height: visible ? implicitHeight : 0
+
+              Button {
+                Layout.fillWidth: true
+                text: "Cancel"
+                iconText: "󰅖"
+                fontSize: Style.font.caption
+                onClicked: {
+                  root.showPlaylistConfirm = false
+                }
+              }
+
+              Button {
+                Layout.fillWidth: true
+                text: "Download All"
+                iconText: "󰑋"
+                selected: true
+                accent: Color.accent
+                fontSize: Style.font.caption
+                onClicked: {
+                  root.showPlaylistConfirm = false
+                  root.startDownload("playlist")
+                }
+              }
+            }
+          }
         }
       }
     }
