@@ -555,7 +555,7 @@ Panel {
             Button {
               Layout.fillWidth: true
               text: "Video (MP4)"
-              iconText: "󰕊"
+              iconText: "󰕧"
               selected: root.selectedFormat === "video"
               onClicked: root.selectedFormat = "video"
             }
